@@ -6,101 +6,108 @@ __email__ = 'e.sennesh@northeastern.edu'
 
 import flatdict
 import glob
-import math
+import logging
 import os
 import warnings
 
 import numpy as np
 import scipy.io as sio
 import scipy.spatial.distance as sd
-import scipy.special as spspecial
+from scipy.spatial.distance import squareform
 import scipy.stats as stats
 from sklearn.cluster import KMeans
 import sklearn
-from scipy.spatial.distance import squareform
+
 from scipy.stats import entropy
 import torch
-from torch import distributions
-import probtorch
-from torch.autograd import Variable
-import torch.nn as nn
 from torch.nn import Parameter
 import torch.utils.data
 
 import nibabel as nib
-import nilearn.image
 from nilearn.input_data import NiftiMasker
-import nilearn.signal
 
-try:
-    if __name__ == '__main__':
-        import matplotlib
-        matplotlib.use('TkAgg')
-finally:
-    import matplotlib
-    import matplotlib.cm as cm
-    import matplotlib.colors
-    from matplotlib import cycler
-    import matplotlib.gridspec as gridspec
-    import matplotlib.patches as mpatches
-    import matplotlib.pyplot as plt
-    import seaborn as sns
+import matplotlib.cm as cm
+import matplotlib.colors
+import matplotlib.patches as mpatches
+import matplotlib.pyplot as plt
 
 MACHINE_EPSILON = np.finfo(np.double).eps
 
-column_width = 2*3.3
-page_width = 6.7
+COLUMN_WIDTH = 5.5
+PAGE_WIDTH = 8.5
+FIGSIZE = (COLUMN_WIDTH, 0.66 * COLUMN_WIDTH)
 
-# colorblind-friendly colors
-# source: https://personal.sron.nl/~pault/
-colors = {
-    'bright': ['4477AA',
-               '66CCEE',
-               '228833',
-               'CCBB44',
-               'EE6677',
-               'AA3377',
-               'BBBBBB'],
-    'high_contrast': ['FFFFFF',
-                      'DDAA33',
-                      'BB5566',
-                      '004488',
-                      '00000'],
-    'vibrant': ['0077BB',
-                '33BBEE',
-                '0099BB',
-                'EE7733',
-                'CC3311',
-                'EE3377',
-                'BBBBBB'],
-    'muted': ['332288',
-              '88CCEE',
-              '44AA99',
-              '117733',
-              '999933',
-              'DDCC77',
-              'CC6677',
-              '882255',
-              'AA4499']
-}
+def average_reconstruction_error(num_blocks, activations, reconstruct):
+    image_norm = np.zeros(num_blocks)
+    reconstruction_error = np.zeros(num_blocks)
+    normed_error = np.zeros(num_blocks)
 
-color_cycler = cycler(color=colors['bright'])
-color_cycler = cycler(color=sns.color_palette('colorblind'))
+    for block in range(num_blocks):
+        results = reconstruct(block)
+        reconstruction = results['weights'] @ results['factors']
 
-plt.rc('legend', frameon=True)
-plt.rc('figure', figsize=(column_width, 0.66 * column_width), dpi=120,
-       frameon=True)
-plt.rc('savefig', dpi=300)
-plt.rc('font', size=9)
-plt.rc('axes', prop_cycle=color_cycler)
+        reconstruction_error[block] = np.linalg.norm(reconstruction -\
+                                                     activations[block])
+        image_norm[block] = np.linalg.norm(activations[block])
+    normed_error = reconstruction_error / image_norm
 
-def plot_cov_ellipse(cov, pos, nstd=2, ax=None, **kwargs):
+    logging.info('Average reconstruction error (MSE): %.8e +/- %.8e',
+                 np.mean(reconstruction_error), np.std(reconstruction_error))
+    logging.info('Average data norm (Euclidean): %.8e +/- %.8e',
+                 np.mean(image_norm), np.std(image_norm))
+    logging.info('Percent average reconstruction error: %f +/- %.8e',
+                 np.mean(normed_error) * 100, np.std(normed_error) * 100)
+
+    return reconstruction_error, image_norm, normed_error
+
+def average_weighted_reconstruction_error(num_blocks, num_times, num_voxels,
+                                          activations, reconstruct):
+    image_norm = np.zeros(num_blocks)
+    reconstruction_error = np.zeros(num_blocks)
+    normed_error = np.zeros(num_blocks)
+    if isinstance(num_voxels,list):
+        num_voxels = num_voxels[0]
+    for block in range(num_blocks):
+        results = reconstruct(block)
+        reconstruction = results['weights'] @ results['factors']
+
+        for t in range(results['weights'].shape[0]):
+            diff = np.linalg.norm(
+                reconstruction[t] - activations[block][t]
+            ) ** 2
+            normalizer = np.linalg.norm(
+                activations[block][t]
+            ) ** 2
+
+            reconstruction_error[block] += diff
+            image_norm[block] += normalizer
+            normed_error[block] += (diff / normalizer)
+
+        reconstruction_error[block] /= num_times[block]
+        image_norm[block] /= num_times[block]
+        normed_error[block] /= num_times[block]
+
+    image_norm = sum(image_norm) / (num_blocks * num_voxels)
+    image_norm = np.sqrt(image_norm)
+    reconstruction_error = sum(reconstruction_error)
+    reconstruction_error /= num_blocks * num_voxels
+    reconstruction_error = np.sqrt(reconstruction_error)
+    normed_error = sum(normed_error) / (num_blocks * num_voxels)
+    normed_error = np.sqrt(normed_error)
+
+    logging.info('Average reconstruction error (MSE): %.8e',
+                 reconstruction_error)
+    logging.info('Average data norm (Euclidean): %.8e', image_norm)
+    logging.info('Percent average reconstruction error: %f',
+                 normed_error * 100.0)
+
+    return reconstruction_error, image_norm, normed_error
+
+def plot_cov_ellipse(cov, pos, nstd=1, ax=None, plot_ellipse=True, **kwargs):
     def eigsorted(cov):
         vals, vecs = np.linalg.eigh(cov)
         order = vals.argsort()[::-1]
         return vals[order], vecs[:, order]
-    if ax is None:
-        ax = plt.gca()
     vals, vecs = eigsorted(cov)
     theta = np.degrees(np.arctan2(*vecs[:, 0][::-1]))
 
@@ -108,43 +115,44 @@ def plot_cov_ellipse(cov, pos, nstd=2, ax=None, **kwargs):
     width, height = 2 * nstd * np.sqrt(vals)
     ellip = mpatches.Ellipse(xy=pos, width=width, height=height, angle=theta,
                              **kwargs)
-    ax.add_artist(ellip)
-    ax.scatter(x=pos[0], y=pos[1], c=kwargs.get('color'), marker='x')
+    if plot_ellipse:
+        ax.add_artist(ellip)
+    color = np.expand_dims(kwargs['color'], axis=0)
+    ax.scatter(x=pos[0], y=pos[1], c=color, marker='x')
     return ellip
 
-def plot_embedding_clusters(mus, sigmas, block_colors, embedding_name,
-                            title, palette, block_clusters, filename=None,
-                            show=True, xlims=None, ylims=None,
-                            figsize=None):
-    fig = plt.figure(figsize=figsize, frameon=True)
-    ax = fig.add_subplot(111, facecolor='white')
-    fig.axes[0].set_xlabel('$%s_1$' % embedding_name)
-    if xlims is not None:
-        fig.axes[0].set_xlim(*xlims)
-    fig.axes[0].set_ylabel('$%s_2$' % embedding_name)
-    if ylims is not None:
-        fig.axes[0].set_ylim(*ylims)
-    fig.axes[0].set_title(title)
-    palette_legend(list(palette.keys()), list(palette.values()))
+def plot_embedding_clusters(mus, sigmas, embedding_colors, embedding_name,
+                            title, palette, filename=None, show=True,
+                            xlims=None, ylims=None, figsize=FIGSIZE,
+                            plot_ellipse=True):
+    with plt.style.context('seaborn-white'):
+        fig, ax = plt.subplots(facecolor='white', figsize=figsize, frameon=True)
+        ax.set_xlabel('$%s_1$' % embedding_name)
+        if xlims is not None:
+            ax.set_xlim(*xlims)
+        ax.set_ylabel('$%s_2$' % embedding_name)
+        if ylims is not None:
+            ax.set_ylim(*ylims)
+        ax.set_title(title)
+        if isinstance(palette, cm.ScalarMappable):
+            plt.colorbar(palette)
+        else:
+            palette_legend(list(palette.keys()), list(palette.values()))
 
-    plotted_clusters = set()
-    for k, color in zip(block_clusters, block_colors):
-        if k in plotted_clusters:
-            continue
-        covk = torch.eye(2) * sigmas[k] ** 2
-        alpha = 0.5
-        alpha /= len({k: v for (k, v) in palette.items() if all(v == color)})
-        plot_cov_ellipse(covk, mus[k], nstd=2, ax=ax, alpha=alpha, color=color)
-        plotted_clusters.add(k)
+        for k, color in enumerate(embedding_colors):
+            covk = torch.eye(2) * sigmas[k] ** 2
+            alpha = 0.66
+            plot_cov_ellipse(covk, mus[k], nstd=1, ax=ax, alpha=alpha,
+                             color=color, plot_ellipse=plot_ellipse)
 
-    if filename is not None:
-        fig.savefig(filename)
-    if show:
-        fig.show()
+        if filename is not None:
+            fig.savefig(filename)
+        if show:
+            fig.show()
 
 def plot_clusters(Xs, mus, covs, K, figsize=(4, 4), xlim=(-10, 10),
                   ylim=(-10, 10)):
-    _, ax = plt.subplots(figsize=figsize)
+    _, ax = plt.subplots(figsize=FIGSIZE)
     ax.set_xlim(*xlim)
     ax.set_ylim(*ylim)
     ax.axis('equal')
@@ -207,15 +215,40 @@ def kmeans_factor_widths(locations, num_factors, kmeans):
         factor_voxels = [labels[v] == factor for v in range(locations.shape[0])]
         yield np.linalg.norm(locations[factor_voxels].var(axis=0))
 
-def initial_hypermeans(activations, locations, num_factors):
+
+def init_width(activations,locations,weight,c):
+    from scipy import optimize
+    start_width = 1000
+    c = np.expand_dims(c,0)
+    objective = lambda w: np.sum((activations - initial_radial_basis(locations,c,w))**2)
+    result = optimize.minimize(objective,x0=start_width)
+
+    return result.x
+
+def initial_hypermeans(activations, locations, num_factors, hotspot=False):
     """Initialize our center, width, and weight parameters via K-means"""
-    kmeans = KMeans(init='k-means++',
-                    n_clusters=num_factors,
-                    n_init=10,
-                    random_state=100)
-    kmeans.fit(locations)
-    initial_centers = kmeans.cluster_centers_
-    initial_widths = list(kmeans_factor_widths(locations, num_factors, kmeans))
+    if hotspot:
+        activation_image = activations.mean(axis=1)
+        activations_mean = np.abs(activation_image - activation_image.mean())
+        centers = np.zeros(shape=(num_factors, locations.shape[1]))
+        widths = np.zeros(shape=(num_factors,))
+        for k in range(num_factors):
+            activations_mean[activations_mean<0] = 0
+            ind = np.argmax(activations_mean)
+            centers[k, :] = locations[ind, :]
+            widths[k] = init_width(activations_mean, locations, activations_mean[ind], centers[k, :])
+            activations_mean = activations_mean - activations_mean[ind]*initial_radial_basis(locations, np.expand_dims(centers[k, :],axis=0), widths[k])
+            activations_mean = activations_mean.squeeze()
+        initial_centers = centers
+        initial_widths = widths
+    else:
+        kmeans = KMeans(init='k-means++',
+                        n_clusters=num_factors,
+                        n_init=10,
+                        random_state=100)
+        kmeans.fit(locations)
+        initial_centers = kmeans.cluster_centers_
+        initial_widths = list(kmeans_factor_widths(locations, num_factors, kmeans))
     initial_factors = initial_radial_basis(locations, initial_centers,
                                            initial_widths)
 
@@ -610,17 +643,17 @@ def intensity_alphas(intensities, scalars=None, normalizer=None):
         result = np.clip(result, 0.0, 1.0)
     return result
 
-def scalar_map_palette(scalars, alphas=None, colormap='Set2', normalizer=None):
+def scalar_map_palette(scalars, alphas=None, colormap='tab20', normalizer=None):
     scalar_map = cm.ScalarMappable(normalizer, colormap)
     colors = scalar_map.to_rgba(scalars, norm=True)
     if alphas is not None:
         colors[:, 3] = alphas
     return colors
 
-def compose_palette(length, alphas=None, colormap='Set2'):
+def compose_palette(length, alphas=None, colormap='tab20'):
     return scalar_map_palette(np.linspace(0, 1, length), alphas, colormap)
 
-def uncertainty_palette(uncertainties, scalars=None, colormap='Set2'):
+def uncertainty_palette(uncertainties, scalars=None, colormap='tab20'):
     alphas = uncertainty_alphas(uncertainties, scalars=scalars)
     return compose_palette(uncertainties.shape[0], alphas=alphas,
                            colormap=colormap)

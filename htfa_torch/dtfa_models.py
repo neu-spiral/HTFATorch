@@ -97,25 +97,37 @@ class DeepTFADecoder(nn.Module):
         self._num_factors = num_factors
 
         self.factors_embedding = nn.Sequential(
-            nn.Linear(self._embedding_dim, self._num_factors),
-            nn.Softsign(),
-            nn.Linear(self._num_factors, self._num_factors * 2),
-            nn.Softsign(),
+            nn.Linear(self._embedding_dim, self._embedding_dim * 2),
+            nn.PReLU(),
+            nn.Linear(self._embedding_dim * 2, self._embedding_dim * 4),
+            nn.PReLU(),
+            nn.Linear(self._embedding_dim * 4, self._num_factors * 4 * 2),
         )
-        self.factor_centers_embedding = nn.Linear(self._num_factors * 2,
-                                                  self._num_factors * 3 * 2)
-        self.factor_log_widths_embedding = nn.Linear(self._num_factors * 2, 2)
-        factors_mean = hyper_means['factor_centers']
-        factors_std = torch.ones(factors_mean.shape)
+        factor_bias_loc = torch.cat(
+            (hyper_means['factor_centers'],
+             hyper_means['factor_log_widths'].unsqueeze(-1)),
+            dim=-1
+        )
+        factor_bias_scale = torch.cat(
+            (0.5 * hyper_means['factor_centers'].std(dim=0).expand(
+                self._num_factors, 3
+            ), hyper_means['factor_log_widths'].std().expand(
+                self._num_factors, 1
+            )),
+            dim=-1
+        )
+        self.factors_embedding[-1].bias = nn.Parameter(
+            torch.stack((factor_bias_loc, factor_bias_scale), dim=-1).reshape(
+                self._num_factors * 4 * 2
+            )
+        )
         self.weights_embedding = nn.Sequential(
-            nn.Linear(self._embedding_dim * 2, self._num_factors),
-            nn.Softsign(),
-            nn.Linear(self._num_factors, self._num_factors * 2),
-            nn.Softsign(),
-            nn.Linear(self._num_factors * 2, self._num_factors * 2),
+            nn.Linear(self._embedding_dim * 2, self._embedding_dim * 4),
+            nn.PReLU(),
+            nn.Linear(self._embedding_dim * 4, self._embedding_dim * 8),
+            nn.PReLU(),
+            nn.Linear(self._embedding_dim * 8, self._num_factors * 2),
         )
-        weights_prior = torch.stack((torch.zeros(self._num_factors),
-                                     torch.ones(self._num_factors)), dim=-1)
 
     def _predict_param(self, params, param, index, predictions, name, trace,
                        predict=True, guide=None):
@@ -161,15 +173,11 @@ class DeepTFADecoder(nn.Module):
             )
         else:
             task_embed = origin
-        factor_params = self.factors_embedding(subject_embed)
-
-        centers_predictions = self.factor_centers_embedding(factor_params).view(
-            -1, self._num_factors, 3, 2
+        factor_params = self.factors_embedding(subject_embed).view(
+            -1, self._num_factors, 4, 2
         )
-        log_widths_predictions = self.factor_log_widths_embedding(factor_params)
-        log_widths_predictions = log_widths_predictions.unsqueeze(1).expand(
-            -1, self._num_factors, 2
-        )
+        centers_predictions = factor_params[:, :, :3]
+        log_widths_predictions = factor_params[:, :, 3]
 
         joint_embed = torch.cat((subject_embed, task_embed), dim=-1)
         weight_predictions = self.weights_embedding(joint_embed).view(
@@ -218,8 +226,10 @@ class DeepTFADecoder(nn.Module):
                     self.predict(trace, params, guide, subject, task, times, b,
                                  generative)
         else:
+            subject = block_subjects[0] if block_subjects else None
+            task = block_tasks[0] if block_tasks else None
             factor_centers, factor_log_widths, weights =\
-                self.predict(trace, params, guide, None, None, times,
+                self.predict(trace, params, guide, subject, task, times,
                              generative=generative)
 
         return weights, factor_centers, factor_log_widths

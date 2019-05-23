@@ -22,6 +22,7 @@ import nibabel as nib
 import nilearn.image
 import nilearn.plotting as niplot
 import numpy as np
+from ordered_set import OrderedSet
 import scipy.io as sio
 from scipy.stats import pearsonr
 from sklearn.manifold import TSNE
@@ -68,6 +69,9 @@ class HierarchicalTopographicFactorAnalysis:
         self.dec = htfa_models.HTFAModel(self.voxel_locations, self.num_blocks,
                                          self.num_times, self.num_factors,
                                          volume=True)
+
+    def num_parameters(self):
+        return sum([param.numel() for param in self.enc.parameters()])
 
     def train(self, num_steps=10, learning_rate=tfa.LEARNING_RATE,
               log_level=logging.WARNING, num_particles=tfa_models.NUM_PARTICLES,
@@ -185,6 +189,71 @@ class HierarchicalTopographicFactorAnalysis:
 
         return np.vstack([free_energies])
 
+    def free_energy(self, batch_size=64, use_cuda=True, blocks_batch_size=4,
+                    blocks_filter=lambda block: True, num_particles=1):
+        training_blocks = [(b, block) for (b, block) in enumerate(self._blocks)
+                           if blocks_filter(block)]
+        activations_loader = torch.utils.data.DataLoader(
+            utils.TFADataset([block.activations
+                              for (_, block) in training_blocks]),
+            batch_size=batch_size,
+            pin_memory=True,
+        )
+        enc = self.enc
+        dec = self.dec
+        if tfa.CUDA and use_cuda:
+            enc.cuda()
+            dec.cuda()
+            cuda_locations = self.voxel_locations.cuda()
+        log_likelihoods = torch.zeros(len(activations_loader))
+        prior_kls = torch.zeros(len(activations_loader))
+
+        for (batch, data) in enumerate(activations_loader):
+            log_likelihoods[batch] = 0.0
+            prior_kls[batch] = 0.0
+
+            block_batches = utils.chunks(list(range(len(training_blocks))),
+                                         n=blocks_batch_size)
+            for block_batch in block_batches:
+                activations = [{'Y': data[:, b, :]} for b in block_batch]
+                block_batch = [training_blocks[b][0] for b in block_batch]
+                if tfa.CUDA and use_cuda:
+                    for b in block_batch:
+                        dec.likelihoods[b].voxel_locations = cuda_locations
+                    for acts in activations:
+                        acts['Y'] = acts['Y'].cuda()
+                trs = (batch * batch_size, None)
+                trs = (trs[0], trs[0] + activations[0]['Y'].shape[0])
+
+                q = probtorch.Trace()
+                enc(q, times=trs, num_particles=num_particles,
+                    blocks=block_batch)
+                p = probtorch.Trace()
+                dec(p, times=trs, guide=q, observations=activations,
+                    blocks=block_batch)
+
+                _, ll, prior_kl = tfa.hierarchical_free_energy(
+                    q, p, num_particles=num_particles
+                )
+
+                log_likelihoods[batch] += ll.detach()
+                prior_kls[batch] += prior_kl.detach()
+
+                if tfa.CUDA and use_cuda:
+                    del activations
+                    for b in block_batch:
+                        dec.likelihoods[b].voxel_locations =\
+                            self.voxel_locations
+                    torch.cuda.empty_cache()
+
+        if tfa.CUDA and use_cuda:
+            dec.cpu()
+            enc.cpu()
+
+        log_likelihood = log_likelihoods.sum(dim=0).item()
+        prior_kl = prior_kls.sum(dim=0).item()
+        return -(log_likelihood - prior_kl), log_likelihood, prior_kl
+
     def save(self, out_dir='.'):
         '''Save a HierarchicalTopographicFactorAnalysis'''
         with open(out_dir + '/' + self._name + '.htfa', 'wb') as file:
@@ -255,8 +324,8 @@ class HierarchicalTopographicFactorAnalysis:
         return plot, centers, log_widths
 
     def normalize_activations(self):
-        subject_runs = list(set([(block.subject, block.run)
-                                 for block in self._blocks]))
+        subject_runs = OrderedSet([(block.subject, block.run)
+                                   for block in self._blocks])
         subject_run_normalizers = {sr: 0 for sr in subject_runs}
 
         for block in range(len(self._blocks)):
@@ -331,7 +400,7 @@ class HierarchicalTopographicFactorAnalysis:
         return p, q
 
     def plot_original_brain(self, block=None, filename='', show=True,
-                            plot_abs=False, t=0, labeler=None, **kwargs):
+                            plot_abs=False, t=0, labeler=None, plot_mean=False, **kwargs):
         if block is None:
             block = np.random.choice(self.num_blocks, 1)[0]
         if self.activation_normalizers is None:
@@ -344,7 +413,10 @@ class HierarchicalTopographicFactorAnalysis:
         image = utils.cmu2nii(self.voxel_activations[block].numpy(),
                               self.voxel_locations.numpy(),
                               self._templates[block])
-        image_slice = nilearn.image.index_img(image, t)
+        if plot_mean:
+            image_slice = nilearn.image.mean_img(image)
+        else:
+            image_slice = nilearn.image.index_img(image, t)
         plot = niplot.plot_glass_brain(
             image_slice, plot_abs=plot_abs, colorbar=True, symmetric_cbar=True,
             title=utils.title_brain_plot(block, self._blocks[block], labeler),
@@ -361,7 +433,7 @@ class HierarchicalTopographicFactorAnalysis:
         return plot
 
     def plot_reconstruction(self, block=None, filename='', show=True,
-                            plot_abs=False, t=0, labeler=None, **kwargs):
+                            plot_abs=False, t=0, labeler=None, plot_mean=False,**kwargs):
         results = self.results()
         if self.activation_normalizers is None:
             self.normalize_activations()
@@ -389,7 +461,10 @@ class HierarchicalTopographicFactorAnalysis:
         image = utils.cmu2nii(reconstruction.numpy(),
                               self.voxel_locations.numpy(),
                               self._templates[block])
-        image_slice = nilearn.image.index_img(image, t)
+        if plot_mean:
+            image_slice = nilearn.image.mean_img(image)
+        else:
+            image_slice = nilearn.image.index_img(image, t)
         plot = niplot.plot_glass_brain(
             image_slice, plot_abs=plot_abs, colorbar=True, symmetric_cbar=True,
             title=utils.title_brain_plot(block, self._blocks[block], labeler,
@@ -521,49 +596,19 @@ class HierarchicalTopographicFactorAnalysis:
         if show:
             plt.show()
 
-    def average_reconstruction_error(self):
+    def average_reconstruction_error(self, weighted=True):
         if self.activation_normalizers is None:
             self.normalize_activations()
 
-        image_norm = np.zeros(self.num_blocks)
-        reconstruction_error = np.zeros(self.num_blocks)
-        normed_error = np.zeros(self.num_blocks)
-
-        for block in range(self.num_blocks):
-            results = self.results(block)
-            reconstruction = results['weights'] @ results['factors']
-
-            for t in range(results['weights'].shape[0]):
-                diff = np.linalg.norm(
-                    reconstruction[t] - self.voxel_activations[block][t]
-                ) ** 2
-                normalizer = np.linalg.norm(
-                    self.voxel_activations[block][t]
-                ) ** 2
-
-                reconstruction_error[block] += diff
-                image_norm[block] += normalizer
-                normed_error[block] += (diff / normalizer)
-
-            reconstruction_error[block] /= self.num_times[block]
-            image_norm[block] /= self.num_times[block]
-            normed_error[block] /= self.num_times[block]
-
-        image_norm = sum(image_norm) / sum(self.num_voxels)
-        image_norm = np.sqrt(image_norm)
-        reconstruction_error = sum(reconstruction_error)
-        reconstruction_error /= sum(self.num_voxels)
-        reconstruction_error = np.sqrt(reconstruction_error)
-        normed_error = sum(normed_error) / sum(self.num_voxels)
-        normed_error = np.sqrt(normed_error)
-
-        logging.info('Average reconstruction error (MSE): %.8e',
-                     reconstruction_error)
-        logging.info('Average data norm (Euclidean): %.8e', image_norm)
-        logging.info('Percent average reconstruction error: %f',
-                     normed_error * 100.0)
-
-        return reconstruction_error, image_norm, normed_error
+        if weighted:
+            return utils.average_weighted_reconstruction_error(
+                self.num_blocks, self.num_times, self.num_voxels,
+                self.voxel_activations, self.results
+            )
+        else:
+            return utils.average_reconstruction_error(
+                self.num_blocks, self.voxel_activations, self.results
+            )
 
     def decoding_accuracy(self, restvtask=False, window_size=5):
         """
