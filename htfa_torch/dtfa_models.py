@@ -24,10 +24,11 @@ from . import tfa_models
 from . import utils
 
 class DeepTFAGenerativeHyperparams(tfa_models.HyperParams):
-    def __init__(self, num_subjects, num_tasks, embedding_dim=2):
+    def __init__(self, num_subjects, num_tasks, num_factors, embedding_dim=2):
         self.num_subjects = num_subjects
         self.num_tasks = num_tasks
         self.embedding_dim = embedding_dim
+        self.num_factors = num_factors
 
         params = utils.vardict({
             'subject': {
@@ -36,10 +37,22 @@ class DeepTFAGenerativeHyperparams(tfa_models.HyperParams):
                          np.sqrt(tfa_models.SOURCE_WEIGHT_STD_DEV**2 +\
                                  tfa_models.SOURCE_LOG_WIDTH_STD_DEV**2),
             },
-            'task': {
-                'mu': torch.zeros(self.num_tasks, self.embedding_dim),
-                'sigma': torch.ones(self.num_tasks, self.embedding_dim) *\
+            'interactions': {
+                'mu': torch.zeros(self.num_tasks*self.num_subjects, self.embedding_dim),
+                'sigma': torch.ones(self.num_tasks*self.num_subjects, self.embedding_dim) *\
                          tfa_models.SOURCE_WEIGHT_STD_DEV,
+            },
+            'global_weight_mean': {
+                'mu': torch.zeros(1, self.num_factors),
+                'sigma': torch.ones(1, self.num_factors),
+            },
+            'stimulus_weight_mean': {
+                'mu': torch.zeros(self.num_tasks, self.num_factors),
+                'sigma': torch.ones(self.num_tasks, self.num_factors),
+            },
+            'participant_weight_mean': {
+                'mu': torch.zeros(self.num_subjects, self.num_factors),
+                'sigma': torch.ones(self.num_subjects, self.num_factors),
             },
             'voxel_noise': torch.ones(1) * tfa_models.VOXEL_NOISE,
         })
@@ -61,9 +74,9 @@ class DeepTFAGuideHyperparams(tfa_models.HyperParams):
                 'mu': torch.zeros(self.num_subjects, self.embedding_dim),
                 'sigma': torch.ones(self.num_subjects, self.embedding_dim),
             },
-            'task': {
-                'mu': torch.zeros(self.num_tasks, self.embedding_dim),
-                'sigma': torch.ones(self.num_tasks, self.embedding_dim),
+            'interactions': {
+                'mu': torch.zeros(self.num_tasks*self.num_subjects, self.embedding_dim),
+                'sigma': torch.ones(self.num_tasks*self.num_subjects, self.embedding_dim),
             },
             'factor_centers': {
                 'mu': hyper_means['factor_centers'].expand(self.num_subjects,
@@ -85,6 +98,23 @@ class DeepTFAGuideHyperparams(tfa_models.HyperParams):
                                   self._num_factors),
                 'sigma': torch.ones(self.num_blocks, self.num_times,
                                     self._num_factors),
+            }
+
+            params['global_weight_mean'] = {
+                'mu': hyper_means['weights'].mean(0).unsqueeze(0),
+                'sigma': torch.ones(1, self._num_factors),
+            }
+
+            params['stimulus_weight_mean'] = {
+                'mu': hyper_means['weights'].mean(0).unsqueeze(0).repeat(1,self.num_tasks)
+                    .view(self.num_tasks,self._num_factors),
+                'sigma': torch.ones(self.num_tasks, self._num_factors),
+            }
+
+            params['participant_weight_mean'] = {
+                'mu': hyper_means['weights'].mean(0).unsqueeze(0).repeat(1,self.num_tasks)
+                    .view(self.num_tasks,self._num_factors),
+                'sigma': torch.ones(self.num_tasks, self._num_factors),
             }
 
         super(self.__class__, self).__init__(params, guide=True)
@@ -125,13 +155,12 @@ class DeepTFADecoder(nn.Module):
             )
         )
         self.weights_embedding = nn.Sequential(
-            nn.Linear(self._embedding_dim * 2, self._embedding_dim * 4),
+            nn.Linear(self._embedding_dim , self._embedding_dim * 4),
             nn.PReLU(),
             nn.Linear(self._embedding_dim * 4, self._embedding_dim * 8),
             nn.PReLU(),
             nn.Linear(self._embedding_dim * 8, self._num_factors * 2),
         )
-
     def _predict_param(self, params, param, index, predictions, name, trace,
                        predict=True, guide=None):
         if name in trace:
@@ -157,7 +186,7 @@ class DeepTFADecoder(nn.Module):
                               value=utils.clamped(name, guide), name=name)
         return result
 
-    def predict(self, trace, params, guide, subject, task, times=(0, 1),
+    def predict(self, trace, params, guide, subject, task, interaction, times=(0, 1),
                 block=-1, generative=False):
         origin = torch.zeros(params['subject']['mu'].shape[0],
                              self._embedding_dim)
@@ -169,26 +198,32 @@ class DeepTFADecoder(nn.Module):
             )
         else:
             subject_embed = origin
-        if task is not None:
-            task_embed = self._predict_param(
-                params, 'task', task, None, 'z^S_{%d,%d}' % (task, block),
+        if interaction is not None:
+            interaction_embed = self._predict_param(
+                params, 'interactions', interaction, None, 'z^I_{%d,%d}' % (interaction, block),
                 trace, False, guide
             )
         else:
-            task_embed = origin
+            interaction_embed = origin
         factor_params = self.factors_embedding(subject_embed).view(
             -1, self._num_factors, 4, 2
         )
         centers_predictions = factor_params[:, :, :3]
         log_widths_predictions = factor_params[:, :, 3]
 
-        joint_embed = torch.cat((subject_embed, task_embed), dim=-1)
-        weight_predictions = self.weights_embedding(joint_embed).view(
+        weight_predictions = self.weights_embedding(interaction_embed).view(
             -1, self._num_factors, 2
         )
         weight_predictions = weight_predictions.unsqueeze(1).expand(
             -1, times[1]-times[0], self._num_factors, 2
         )
+
+        global_weight_mean = self._predict_param(params,'global_weight_mean',None,None,
+                                                 'GlobalWeightMean',trace,False,guide)
+        stimulus_weight_mean = self._predict_param(params,'stimulus_weight_mean',task,None,
+                                                   'm^{WS}_{%d}' % (task),trace,False,guide)
+        participant_weight_mean = self._predict_param(params,'participant_weight_mean',subject,None,
+                                                   'm^{WP}_{%d}' % (subject),trace,False,guide)
 
         centers_predictions = self._predict_param(
             params, 'factor_centers', subject, centers_predictions,
@@ -207,9 +242,15 @@ class DeepTFADecoder(nn.Module):
             guide=guide,
         )
 
+        if generative:
+            stimulus_weight_mean = stimulus_weight_mean.unsqueeze(1).expand(-1,times[1]-times[0],self._num_factors)
+            participant_weight_mean = participant_weight_mean.unsqueeze(1).expand(-1,times[1]-times[0],self._num_factors)
+            global_weight_mean = global_weight_mean.unsqueeze(1).expand(-1,times[1]-times[0],self._num_factors)
+            weight_predictions = weight_predictions + stimulus_weight_mean + participant_weight_mean + global_weight_mean
+
         return centers_predictions, log_widths_predictions, weight_predictions
 
-    def forward(self, trace, blocks, block_subjects, block_tasks, params, times,
+    def forward(self, trace, blocks, block_subjects, block_tasks, block_interactions, params, times,
                 guide=None, num_particles=tfa_models.NUM_PARTICLES,
                 generative=False):
         params = utils.vardict(params)
@@ -225,22 +266,24 @@ class DeepTFADecoder(nn.Module):
             for (i, b) in enumerate(blocks):
                 subject = block_subjects[i] if b is not None else None
                 task = block_tasks[i] if b is not None else None
-
+                interaction = block_interactions[i] if b is not None else None
                 factor_centers[i], factor_log_widths[i], weights[i] =\
-                    self.predict(trace, params, guide, subject, task, times, b,
+                    self.predict(trace, params, guide, subject, task, interaction, times, b,
                                  generative)
         else:
             subject = block_subjects[0] if block_subjects else None
             task = block_tasks[0] if block_tasks else None
+            interaction = block_interactions[0] if block_interactions else None
             factor_centers, factor_log_widths, weights =\
-                self.predict(trace, params, guide, subject, task, times,
+                self.predict(trace, params, guide, subject, task,interaction, times,
                              generative=generative)
 
         return weights, factor_centers, factor_log_widths
 
+
 class DeepTFAGuide(nn.Module):
     """Variational guide for deep topographic factor analysis"""
-    def __init__(self, num_factors, block_subjects, block_tasks, num_blocks=1,
+    def __init__(self, num_factors, block_subjects, block_tasks, block_interactions, num_blocks=1,
                  num_times=[1], embedding_dim=2, hyper_means=None,
                  time_series=True):
         super(self.__class__, self).__init__()
@@ -252,6 +295,7 @@ class DeepTFAGuide(nn.Module):
 
         self.block_subjects = block_subjects
         self.block_tasks = block_tasks
+        self.block_interactions = block_interactions
         num_subjects = len(set(self.block_subjects))
         num_tasks = len(set(self.block_tasks))
 
@@ -275,18 +319,23 @@ class DeepTFAGuide(nn.Module):
                           if b in blocks]
         block_tasks = [self.block_tasks[b] for b in range(self._num_blocks)
                        if b in blocks]
+        block_interactions = [self.block_interactions[b] for b in range(self._num_blocks)
+                       if b in blocks]
         if times and self._time_series:
             for k, v in params['weights'].items():
                 params['weights'][k] = v[:, :, times[0]:times[1], :]
 
-        return decoder(trace, blocks, block_subjects, block_tasks, params,
+        return decoder(trace, blocks, block_subjects, block_tasks, block_interactions, params,
                        times=times, num_particles=num_particles)
+
 
 class DeepTFAModel(nn.Module):
     """Generative model for deep topographic factor analysis"""
-    def __init__(self, locations, block_subjects, block_tasks,
+
+    def __init__(self, locations, block_subjects, block_tasks, block_interactions,
                  num_factors=tfa_models.NUM_FACTORS, num_blocks=1,
                  num_times=[1], embedding_dim=2):
+
         super(self.__class__, self).__init__()
         self._locations = locations
         self._num_factors = num_factors
@@ -294,9 +343,10 @@ class DeepTFAModel(nn.Module):
         self._num_times = num_times
         self.block_subjects = block_subjects
         self.block_tasks = block_tasks
+        self.block_interactions = block_interactions
 
         self.hyperparams = DeepTFAGenerativeHyperparams(
-            len(set(block_subjects)), len(set(block_tasks)), embedding_dim
+            len(set(block_subjects)), len(set(block_tasks)), num_factors, embedding_dim
         )
         self.likelihoods = [tfa_models.TFAGenerativeLikelihood(
             locations, self._num_times[b], block=b, register_locations=False
@@ -317,9 +367,11 @@ class DeepTFAModel(nn.Module):
                           if b in blocks]
         block_tasks = [self.block_tasks[b] for b in range(self._num_blocks)
                        if b in blocks]
+        block_interactions = [self.block_interactions[b] for b in range(self._num_blocks)
+                       if b in blocks]
 
         weights, centers, log_widths = decoder(trace, blocks, block_subjects,
-                                               block_tasks, params, times,
+                                               block_tasks, block_interactions, params, times,
                                                guide=guide,
                                                num_particles=1,
                                                generative=True)
