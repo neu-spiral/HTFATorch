@@ -917,7 +917,7 @@ class DeepTFA:
         import itertools
         if filename == '':
 
-            filename = self.common_name() + '_task_embedding.pdf'
+            filename = self.common_name() + '_interactions_embedding.pdf'
         hyperparams = self.variational.hyperparams.state_vardict()
         z_ps_mu = hyperparams['interactions']['mu'].data
         z_ps_sigma = softplus(hyperparams['interactions']['sigma'].data)

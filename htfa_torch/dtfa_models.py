@@ -34,8 +34,7 @@ class DeepTFAGenerativeHyperparams(tfa_models.HyperParams):
             'subject': {
                 'mu': torch.zeros(self.num_subjects, self.embedding_dim),
                 'sigma': torch.ones(self.num_subjects, self.embedding_dim) *\
-                         np.sqrt(tfa_models.SOURCE_WEIGHT_STD_DEV**2 +\
-                                 tfa_models.SOURCE_LOG_WIDTH_STD_DEV**2),
+                         tfa_models.SOURCE_LOG_WIDTH_STD_DEV,
             },
             'interactions': {
                 'mu': torch.zeros(self.num_tasks*self.num_subjects, self.embedding_dim),
@@ -246,7 +245,7 @@ class DeepTFADecoder(nn.Module):
             stimulus_weight_mean = stimulus_weight_mean.unsqueeze(1).expand(-1,times[1]-times[0],self._num_factors)
             participant_weight_mean = participant_weight_mean.unsqueeze(1).expand(-1,times[1]-times[0],self._num_factors)
             global_weight_mean = global_weight_mean.unsqueeze(1).expand(-1,times[1]-times[0],self._num_factors)
-            weight_predictions = weight_predictions + stimulus_weight_mean + participant_weight_mean + global_weight_mean
+            weight_predictions = weight_predictions + stimulus_weight_mean + participant_weight_mean - global_weight_mean
 
         return centers_predictions, log_widths_predictions, weight_predictions
 
