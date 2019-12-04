@@ -34,26 +34,25 @@ class DeepTFAGenerativeHyperparams(tfa_models.HyperParams):
             'subject': {
                 'mu': torch.zeros(self.num_subjects, self.embedding_dim),
                 'sigma': torch.ones(self.num_subjects, self.embedding_dim) *\
-                         np.sqrt(tfa_models.SOURCE_WEIGHT_STD_DEV**2 +\
-                                 tfa_models.SOURCE_LOG_WIDTH_STD_DEV**2),
+                         tfa_models.SOURCE_LOG_WIDTH_STD_DEV,
             },
             'interactions': {
                 'mu': torch.zeros(self.num_tasks*self.num_subjects, self.embedding_dim),
-                'sigma': torch.ones(self.num_tasks*self.num_subjects, self.embedding_dim) *\
-                         tfa_models.SOURCE_WEIGHT_STD_DEV,
+                'sigma': torch.ones(self.num_tasks*self.num_subjects, self.embedding_dim) #*tfa_models.SOURCE_WEIGHT_STD_DEV,
+            },
+            'stimulus_weight': {
+                'mu': torch.zeros(self.num_tasks, self.embedding_dim),
+                'sigma': torch.ones(self.num_tasks, self.embedding_dim) #* tfa_models.SOURCE_WEIGHT_STD_DEV,
+            },
+            'participant_weight': {
+                'mu': torch.zeros(self.num_subjects, self.embedding_dim),
+                'sigma': torch.ones(self.num_subjects, self.embedding_dim) #* tfa_models.SOURCE_WEIGHT_STD_DEV,
             },
             'global_weight_mean': {
                 'mu': torch.zeros(1, self.num_factors),
                 'sigma': torch.ones(1, self.num_factors),
             },
-            'stimulus_weight_mean': {
-                'mu': torch.zeros(self.num_tasks, self.num_factors),
-                'sigma': torch.ones(self.num_tasks, self.num_factors),
-            },
-            'participant_weight_mean': {
-                'mu': torch.zeros(self.num_subjects, self.num_factors),
-                'sigma': torch.ones(self.num_subjects, self.num_factors),
-            },
+
             'voxel_noise': torch.ones(1) * tfa_models.VOXEL_NOISE,
         })
 
@@ -77,6 +76,14 @@ class DeepTFAGuideHyperparams(tfa_models.HyperParams):
             'interactions': {
                 'mu': torch.zeros(self.num_tasks*self.num_subjects, self.embedding_dim),
                 'sigma': torch.ones(self.num_tasks*self.num_subjects, self.embedding_dim),
+            },
+            'stimulus_weight': {
+                'mu': torch.zeros(self.num_tasks, self.embedding_dim),
+                'sigma': torch.ones(self.num_tasks, self.embedding_dim),
+            },
+            'participant_weight': {
+                'mu': torch.zeros(self.num_subjects, self.embedding_dim),
+                'sigma': torch.ones(self.num_subjects, self.embedding_dim),
             },
             'factor_centers': {
                 'mu': hyper_means['factor_centers'].expand(self.num_subjects,
@@ -103,18 +110,6 @@ class DeepTFAGuideHyperparams(tfa_models.HyperParams):
             params['global_weight_mean'] = {
                 'mu': hyper_means['weights'].mean(0).unsqueeze(0),
                 'sigma': torch.ones(1, self._num_factors),
-            }
-
-            params['stimulus_weight_mean'] = {
-                'mu': hyper_means['weights'].mean(0).unsqueeze(0).repeat(1,self.num_tasks)
-                    .view(self.num_tasks,self._num_factors),
-                'sigma': torch.ones(self.num_tasks, self._num_factors),
-            }
-
-            params['participant_weight_mean'] = {
-                'mu': hyper_means['weights'].mean(0).unsqueeze(0).repeat(1,self.num_tasks)
-                    .view(self.num_tasks,self._num_factors),
-                'sigma': torch.ones(self.num_tasks, self._num_factors),
             }
 
         super(self.__class__, self).__init__(params, guide=True)
@@ -155,12 +150,27 @@ class DeepTFADecoder(nn.Module):
             )
         )
         self.weights_embedding = nn.Sequential(
-            nn.Linear(self._embedding_dim , self._embedding_dim * 4),
+            nn.Linear(self._embedding_dim , self._embedding_dim * 4,bias=False),
             nn.PReLU(),
-            nn.Linear(self._embedding_dim * 4, self._embedding_dim * 8),
+            nn.Linear(self._embedding_dim * 4, self._embedding_dim * 8,bias=False),
             nn.PReLU(),
-            nn.Linear(self._embedding_dim * 8, self._num_factors * 2),
+            nn.Linear(self._embedding_dim * 8, self._num_factors * 2,bias=False),
         )
+        self.stimulus_weights_embedding = nn.Sequential(
+            nn.Linear(self._embedding_dim , self._embedding_dim * 4,bias=False),
+            nn.PReLU(),
+            nn.Linear(self._embedding_dim * 4, self._embedding_dim * 8,bias=False),
+            nn.PReLU(),
+            nn.Linear(self._embedding_dim * 8, self._num_factors,bias=False),
+        )
+        self.participant_weights_embedding = nn.Sequential(
+            nn.Linear(self._embedding_dim , self._embedding_dim * 4,bias=False),
+            nn.PReLU(),
+            nn.Linear(self._embedding_dim * 4, self._embedding_dim * 8,bias=False),
+            nn.PReLU(),
+            nn.Linear(self._embedding_dim * 8, self._num_factors,bias=False),
+        )
+
     def _predict_param(self, params, param, index, predictions, name, trace,
                        predict=True, guide=None):
         if name in trace:
@@ -196,8 +206,20 @@ class DeepTFADecoder(nn.Module):
                 params, 'subject', subject, None,
                 'z^P_{%d,%d}' % (subject, block), trace, False, guide
             )
+            subject_weight_embed = self._predict_param(
+                params, 'participant_weight', subject, None,
+                'z^{PW}_{%d,%d}' % (subject, block), trace, False, guide
+            )
         else:
             subject_embed = origin
+            subject_weight_embed = origin
+        if task is not None:
+            task_weight_embed = self._predict_param(
+                params, 'stimulus_weight', task, None,
+                'z^{SW}_{%d,%d}' % (task, block), trace, False, guide
+            )
+        else:
+            task_weight_embed = origin
         if interaction is not None:
             interaction_embed = self._predict_param(
                 params, 'interactions', interaction, None, 'z^I_{%d,%d}' % (interaction, block),
@@ -220,10 +242,8 @@ class DeepTFADecoder(nn.Module):
 
         global_weight_mean = self._predict_param(params,'global_weight_mean',None,None,
                                                  'GlobalWeightMean',trace,False,guide)
-        stimulus_weight_mean = self._predict_param(params,'stimulus_weight_mean',task,None,
-                                                   'm^{WS}_{%d}' % (task),trace,False,guide)
-        participant_weight_mean = self._predict_param(params,'participant_weight_mean',subject,None,
-                                                   'm^{WP}_{%d}' % (subject),trace,False,guide)
+
+
 
         centers_predictions = self._predict_param(
             params, 'factor_centers', subject, centers_predictions,
@@ -243,10 +263,14 @@ class DeepTFADecoder(nn.Module):
         )
 
         if generative:
-            stimulus_weight_mean = stimulus_weight_mean.unsqueeze(1).expand(-1,times[1]-times[0],self._num_factors)
-            participant_weight_mean = participant_weight_mean.unsqueeze(1).expand(-1,times[1]-times[0],self._num_factors)
+            stimulus_weight_mean = self.stimulus_weights_embedding(task_weight_embed).view(-1, self._num_factors)
+            stimulus_weight_mean = stimulus_weight_mean.unsqueeze(1).expand(-1, times[1] - times[0], self._num_factors)
+            participant_weight_mean = self.participant_weights_embedding(subject_weight_embed).view(-1,
+                                                                                                    self._num_factors)
+            participant_weight_mean = participant_weight_mean.unsqueeze(1).expand(-1, times[1] - times[0],
+                                                                                  self._num_factors)
             global_weight_mean = global_weight_mean.unsqueeze(1).expand(-1,times[1]-times[0],self._num_factors)
-            weight_predictions = weight_predictions + stimulus_weight_mean + participant_weight_mean + global_weight_mean
+            weight_predictions = weight_predictions + stimulus_weight_mean + participant_weight_mean - global_weight_mean
 
         return centers_predictions, log_widths_predictions, weight_predictions
 
