@@ -111,9 +111,9 @@ class DeepTFAGuideHyperparams(tfa_models.HyperParams):
             }
 
             params['participant_weight_mean'] = {
-                'mu': hyper_means['weights'].mean(0).unsqueeze(0).repeat(1,self.num_tasks)
-                    .view(self.num_tasks,self._num_factors),
-                'sigma': torch.ones(self.num_tasks, self._num_factors),
+                'mu': hyper_means['weights'].mean(0).unsqueeze(0).repeat(1,self.num_subjects)
+                    .view(self.num_subjects,self._num_factors),
+                'sigma': torch.ones(self.num_subjects, self._num_factors),
             }
 
         super(self.__class__, self).__init__(params, guide=True)
@@ -220,9 +220,9 @@ class DeepTFADecoder(nn.Module):
         global_weight_mean = self._predict_param(params,'global_weight_mean',None,None,
                                                  'GlobalWeightMean',trace,False,guide)
         stimulus_weight_mean = self._predict_param(params,'stimulus_weight_mean',task,None,
-                                                   'm^{WS}_{%d}' % (task),trace,False,guide)
+                                                   'm^{WS}_{%d}' % (task),trace,False,guide) # + global_weight_mean
         participant_weight_mean = self._predict_param(params,'participant_weight_mean',subject,None,
-                                                   'm^{WP}_{%d}' % (subject),trace,False,guide)
+                                                   'm^{WP}_{%d}' % (subject),trace,False,guide)# + global_weight_mean
 
         centers_predictions = self._predict_param(
             params, 'factor_centers', subject, centers_predictions,
