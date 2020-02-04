@@ -135,7 +135,8 @@ class DeepTFADecoder(nn.Module):
             self.register_buffer('locations_max',
                                  torch.max(locations, dim=0)[0])
         self.weights_embedding = nn.Sequential(
-            nn.Linear(self._embedding_dim * 2, self._embedding_dim * 4),
+            nn.Linear(self._num_factors + self._embedding_dim * 2,
+                      self._embedding_dim * 4),
             nn.PReLU(),
             nn.Linear(self._embedding_dim * 4, self._embedding_dim * 8),
             nn.PReLU(),
