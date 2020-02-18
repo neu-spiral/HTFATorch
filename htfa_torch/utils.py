@@ -7,6 +7,7 @@ __email__ = 'e.sennesh@northeastern.edu'
 import flatdict
 import glob
 import logging
+from ordered_set import OrderedSet
 import os
 import warnings
 
@@ -33,22 +34,30 @@ import matplotlib.pyplot as plt
 
 MACHINE_EPSILON = np.finfo(np.double).eps
 
-COLUMN_WIDTH = 5.5
+COLUMN_WIDTH = 3.3
 PAGE_WIDTH = 8.5
-FIGSIZE = (COLUMN_WIDTH, 0.66 * COLUMN_WIDTH)
+PAGE_HEIGHT = 11
+FIGSIZE = (COLUMN_WIDTH, 0.25 * PAGE_HEIGHT)
 
-def average_reconstruction_error(num_blocks, activations, reconstruct):
+def striping_diagonal_indices(rows, cols):
+    for row in range(rows):
+        for col in range(cols):
+            if row % cols == col:
+                yield (row, col)
+
+def average_reconstruction_error(blocks, activations, reconstruct):
+    num_blocks = len(blocks)
     image_norm = np.zeros(num_blocks)
     reconstruction_error = np.zeros(num_blocks)
     normed_error = np.zeros(num_blocks)
 
-    for block in range(num_blocks):
+    for b, block in enumerate(blocks):
         results = reconstruct(block)
         reconstruction = results['weights'] @ results['factors']
 
-        reconstruction_error[block] = np.linalg.norm(reconstruction -\
-                                                     activations[block])
-        image_norm[block] = np.linalg.norm(activations[block])
+        reconstruction_error[b] = np.linalg.norm(reconstruction -\
+                                                 activations[block])
+        image_norm[b] = np.linalg.norm(activations[block])
     normed_error = reconstruction_error / image_norm
 
     logging.info('Average reconstruction error (MSE): %.8e +/- %.8e',
@@ -60,14 +69,15 @@ def average_reconstruction_error(num_blocks, activations, reconstruct):
 
     return reconstruction_error, image_norm, normed_error
 
-def average_weighted_reconstruction_error(num_blocks, num_times, num_voxels,
+def average_weighted_reconstruction_error(blocks, num_times, num_voxels,
                                           activations, reconstruct):
+    num_blocks = len(blocks)
     image_norm = np.zeros(num_blocks)
     reconstruction_error = np.zeros(num_blocks)
     normed_error = np.zeros(num_blocks)
-    if isinstance(num_voxels,list):
+    if isinstance(num_voxels, list):
         num_voxels = num_voxels[0]
-    for block in range(num_blocks):
+    for b, block in enumerate(blocks):
         results = reconstruct(block)
         reconstruction = results['weights'] @ results['factors']
 
@@ -79,13 +89,13 @@ def average_weighted_reconstruction_error(num_blocks, num_times, num_voxels,
                 activations[block][t]
             ) ** 2
 
-            reconstruction_error[block] += diff
-            image_norm[block] += normalizer
-            normed_error[block] += (diff / normalizer)
+            reconstruction_error[b] += diff
+            image_norm[b] += normalizer
+            normed_error[b] += (diff / normalizer)
 
-        reconstruction_error[block] /= num_times[block]
-        image_norm[block] /= num_times[block]
-        normed_error[block] /= num_times[block]
+        reconstruction_error[b] /= num_times[block]
+        image_norm[b] /= num_times[block]
+        normed_error[b] /= num_times[block]
 
     image_norm = sum(image_norm) / (num_blocks * num_voxels)
     image_norm = np.sqrt(image_norm)
@@ -103,7 +113,8 @@ def average_weighted_reconstruction_error(num_blocks, num_times, num_voxels,
 
     return reconstruction_error, image_norm, normed_error
 
-def plot_cov_ellipse(cov, pos, nstd=1, ax=None, plot_ellipse=True, **kwargs):
+def plot_cov_ellipse(cov, pos, nstd=1, ax=None, plot_ellipse=True, marker='x',
+                     **kwargs):
     def eigsorted(cov):
         vals, vecs = np.linalg.eigh(cov)
         order = vals.argsort()[::-1]
@@ -114,45 +125,86 @@ def plot_cov_ellipse(cov, pos, nstd=1, ax=None, plot_ellipse=True, **kwargs):
     # Width and height are "full" widths, not radius
     width, height = 2 * nstd * np.sqrt(vals)
     ellip = mpatches.Ellipse(xy=pos, width=width, height=height, angle=theta,
-                             **kwargs)
+                             fill=False, **kwargs)
     if plot_ellipse:
         ax.add_artist(ellip)
     color = np.expand_dims(kwargs['color'], axis=0)
-    ax.scatter(x=pos[0], y=pos[1], c=color, marker='x')
+    ax.scatter(x=pos[0], y=pos[1], c=color, marker=marker)
     return ellip
 
-def plot_embedding_clusters(mus, sigmas, embedding_colors, embedding_name,
-                            title, palette, filename=None, show=True,
-                            xlims=None, ylims=None, figsize=FIGSIZE,
-                            plot_ellipse=True):
+def embedding_clusters_fig(mus, sigmas, embedding_colors, embedding_name, title,
+                           palette, filename=None, show=True, xlims=None,
+                           ylims=None, figsize=FIGSIZE, plot_ellipse=True,
+                           legend_ordering=None):
     with plt.style.context('seaborn-white'):
         fig, ax = plt.subplots(facecolor='white', figsize=figsize, frameon=True)
-        ax.set_xlabel('$%s_1$' % embedding_name)
-        if xlims is not None:
-            ax.set_xlim(*xlims)
-        ax.set_ylabel('$%s_2$' % embedding_name)
-        if ylims is not None:
-            ax.set_ylim(*ylims)
-        ax.set_title(title)
-        if isinstance(palette, cm.ScalarMappable):
-            plt.colorbar(palette)
-        else:
-            palette_legend(list(palette.keys()), list(palette.values()))
+        plot_embedding_clusters(mus, sigmas, embedding_colors,
+                                embedding_name, title, palette, ax, xlims,
+                                ylims, plot_ellipse, legend_ordering)
 
-        for k, color in enumerate(embedding_colors):
-            covk = torch.eye(2) * sigmas[k] ** 2
-            alpha = 0.66
-            plot_cov_ellipse(covk, mus[k], nstd=1, ax=ax, alpha=alpha,
-                             color=color, plot_ellipse=plot_ellipse)
-
+        plt.tight_layout()
         if filename is not None:
             fig.savefig(filename)
         if show:
             fig.show()
 
+MPL_PATCH_HATCHES = ['/', "\\", '|', '-', '+', 'x', 'o', 'O', '.', '*']
+MPL_NICE_MARKERS = ['x', 'X', '.', 'o', 'v', '^', '<', '>', '1', '2', '3', '4',
+                    '8', 's', 'p', 'P', '*', 'h', 'H', '+', 'D', 'd']
+
+def plot_embedding_clusters(mus, sigmas, embedding_colors, embedding_name,
+                            title, palette, ax, xlims=None, ylims=None,
+                            plot_ellipse=True, legend_ordering=None,
+                            color_legend=True):
+    if embedding_name:
+        ax.set_xlabel('$%s_1$' % embedding_name)
+        ax.set_ylabel('$%s_2$' % embedding_name)
+    ax.set_xticks([])
+    ax.set_yticks([])
+
+    if xlims is not None:
+        ax.set_xlim(*xlims)
+    else:
+        ax.set_xlim(mus[:, 0].min(dim=0) - 0.1, mus[:, 0].max(dim=0) + 0.1)
+    if ylims is not None:
+        ax.set_ylim(*ylims)
+    else:
+        ax.set_ylim(mus[:, 1].min(dim=0) - 0.1, mus[:, 1].max(dim=0) + 0.1)
+
+    ax.set_title(title)
+
+    if isinstance(palette, cm.ScalarMappable) and color_legend:
+        palette.set_clim(0, 1)
+        plt.colorbar(palette)
+    elif color_legend:
+        if legend_ordering is None:
+            legend_ordering = []
+            colors = list(palette.values())
+            sorted_colors = sorted(zip(mus, embedding_colors),
+                                   key=lambda pair: pair[0][0])
+            for embedding_color in [color[1] for color in sorted_colors]:
+                for k, color in enumerate(colors):
+                    if (color == embedding_color).all():
+                        legend_ordering.append(k)
+                        continue
+            legend_ordering = OrderedSet(legend_ordering)
+        palette_legend(list(palette.keys()), list(palette.values()),
+                       ordering=legend_ordering)
+
+    styles = {str(color): None for color in embedding_colors}
+    for k, color in enumerate(styles.keys()):
+        styles[str(color)] = (MPL_PATCH_HATCHES[k % len(MPL_PATCH_HATCHES)],
+                              MPL_NICE_MARKERS[k % len(MPL_NICE_MARKERS)])
+    for k, color in enumerate(embedding_colors):
+        covk = torch.eye(2) * sigmas[k] ** 2
+        alpha = 0.66
+        plot_cov_ellipse(covk, mus[k], nstd=1, ax=ax, alpha=alpha, color=color,
+                         plot_ellipse=plot_ellipse, hatch=styles[str(color)][0],
+                         marker=styles[str(color)][1])
+
 def plot_clusters(Xs, mus, covs, K, figsize=(4, 4), xlim=(-10, 10),
                   ylim=(-10, 10)):
-    _, ax = plt.subplots(figsize=FIGSIZE)
+    _, ax = plt.subplots(figsize=figsize)
     ax.set_xlim(*xlim)
     ax.set_ylim(*ylim)
     ax.axis('equal')
@@ -164,14 +216,15 @@ def plot_clusters(Xs, mus, covs, K, figsize=(4, 4), xlim=(-10, 10),
 def sorted_glob(pattern):
     return sorted(glob.glob(pattern))
 
-BRAIN_PLOT_TITLE_TEMPLATE = "(Participant %s, Run %d, Stimulus: %s, %s)"
+BRAIN_PLOT_TITLE_TEMPLATE = "(Participant %s, Run %d, Stimulus: %s, TR: %s, %s)"
 
-def title_brain_plot(n, block, labeler, kind='Original'):
+def title_brain_plot(n, block, labeler, t=None, kind='Original'):
     label = labeler(block)
-    if label:
+    if label and t is not None:
+        return '%s (%s, Block %d, TR %d)' % (label, kind, n, t)
+    elif label:
         return '%s (%s, Block %d)' % (label, kind, n)
-    params = (block.subject, block.run, block.task, kind)
-    return BRAIN_PLOT_TITLE_TEMPLATE % params
+    return None
 
 def clamped(rv, guide=None, observations=None):
     if not guide:
@@ -292,26 +345,57 @@ def full_fact(dimensions):
             row += len(vals)
         return independents
 
-def nii2cmu(nifti_file, mask_file=None, smooth=None, zscore=False):
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        image = nib.load(nifti_file)
-        mask = NiftiMasker(mask_strategy='background', smoothing_fwhm=smooth,
-                           standardize=zscore)
-        if mask_file is None:
-            mask.fit(nifti_file)
-        else:
-            mask.fit(mask_file)
+def nii2cmu(nifti_file, mask_file=None, smooth=None, zscore=False,
+            zscore_by_rest=False, rest_starts=None, rest_ends=None):
+    if zscore_by_rest:
+        rest_starts = rest_starts.strip('[]')
+        rest_starts = [int(s) for s in rest_starts.split(',')]
+        rest_ends = rest_ends.strip('[]')
+        rest_ends = [int(s) for s in rest_ends.split(',')]
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            image = nib.load(nifti_file)
+            mask = NiftiMasker(mask_strategy='background', smoothing_fwhm=smooth,
+                               standardize=False)
+            if mask_file is None:
+                mask.fit(nifti_file)
+            else:
+                mask.fit(mask_file)
+        header = image.header
+        sform = image.get_sform()
+        voxel_size = header.get_zooms()
+        voxel_activations = np.float64(mask.transform(nifti_file)).transpose()
+        rest_activations = voxel_activations[:, rest_starts[0]:rest_ends[0]]
+        for i in range(1, len(rest_starts)):
+            rest_activations = np.hstack((rest_activations, voxel_activations[:, rest_starts[i]:rest_ends[i]]))
+        standard_transform = sklearn.preprocessing.StandardScaler().fit(rest_activations.T)
+        voxel_activations = standard_transform.transform(voxel_activations.T).T
+        voxel_coordinates = np.array(np.nonzero(mask.mask_img_.dataobj)).transpose()
+        voxel_coordinates = np.hstack((voxel_coordinates,
+                                       np.ones((voxel_coordinates.shape[0], 1))))
+        voxel_locations = (voxel_coordinates @ sform.T)[:, :3]
+    else:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            image = nib.load(nifti_file)
+            mask = NiftiMasker(mask_strategy='background', smoothing_fwhm=smooth,
+                               standardize=zscore)
+            if mask_file is None:
+                mask.fit(nifti_file)
+            else:
+                mask.fit(mask_file)
 
-    header = image.header
-    sform = image.get_sform()
-    voxel_size = header.get_zooms()
-    voxel_activations = np.float64(mask.transform(nifti_file)).transpose()
-    voxel_coordinates = np.array(np.nonzero(mask.mask_img_.dataobj)).transpose()
-    voxel_coordinates = np.hstack((voxel_coordinates,
-                                   np.ones((voxel_coordinates.shape[0], 1))))
-    voxel_locations = (voxel_coordinates @ sform.T)[:, :3]
+        header = image.header
+        sform = image.get_sform()
+        voxel_size = header.get_zooms()
+        voxel_activations = np.float64(mask.transform(nifti_file)).transpose()
+        voxel_coordinates = np.array(np.nonzero(mask.mask_img_.dataobj)).transpose()
+        voxel_coordinates = np.hstack((voxel_coordinates,
+                                       np.ones((voxel_coordinates.shape[0], 1))))
+        voxel_locations = (voxel_coordinates @ sform.T)[:, :3]
+
     return {'data': voxel_activations, 'R': voxel_locations}
+
 
 def cmu2nii(activations, locations, template):
     image = nib.load(template)
@@ -353,14 +437,15 @@ def load_collective_dataset(data_files, mask):
 
     return activations, locations, names, templates
 
-def load_dataset(data_file, mask=None, zscore=True, smooth=None):
+def load_dataset(data_file, mask=None, zscore=True,
+                 zscore_by_rest=False, smooth=None, rest_starts=None, rest_ends=None):
     name, ext = os.path.splitext(data_file)
     if ext == 'mat':
         dataset = sio.loadmat(data_file)
         template = None
     else:
         dataset = nii2cmu(data_file, mask_file=mask, smooth=smooth,
-                          zscore=zscore)
+                          zscore=zscore,zscore_by_rest=zscore_by_rest,rest_starts=rest_starts,rest_ends=rest_ends)
         template = data_file
     _, name = os.path.split(name)
     # pull out the voxel activations and locations
@@ -658,10 +743,13 @@ def uncertainty_palette(uncertainties, scalars=None, colormap='tab20'):
     return compose_palette(uncertainties.shape[0], alphas=alphas,
                            colormap=colormap)
 
-def palette_legend(labels, colors):
+def palette_legend(labels, colors, ordering=None):
     patches = [mpatches.Patch(color=colors[i], label=labels[i]) for i in
                range(len(colors))]
-    plt.legend(handles=patches, loc='lower left')
+    if ordering:
+        assert len(patches) == len(ordering)
+        patches = [patches[i] for i in ordering]
+    plt.legend(handles=patches, loc='best')
 
 def isnan(tensor):
     # Gross: https://github.com/pytorch/pytorch/issues/4767

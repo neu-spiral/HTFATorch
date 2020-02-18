@@ -9,6 +9,7 @@ __email__ = ('j.vandemeent@northeastern.edu',
 from functools import lru_cache
 import json
 import logging
+from ordered_set import OrderedSet
 import types
 
 import dataset
@@ -17,14 +18,19 @@ import torch.utils.data
 from . import utils
 
 @lru_cache(maxsize=16)
-def lru_load_dataset(fname, mask, zscore, smooth):
-    logging.info('Loading Nifti image %s with mask %s (zscore=%s, smooth=%s)',
-                 fname, mask, zscore, smooth)
-    return utils.load_dataset(fname, mask, zscore, smooth)
+def lru_load_dataset(fname, mask, zscore, smooth,
+                     zscore_by_rest=False,rest_starts=None,
+                     rest_ends=None):
+    logging.info('Loading Nifti image %s with mask %s (zscore=%s, smooth=%s, zscore_by_rest=%s)',
+                 fname, mask, zscore, smooth,zscore_by_rest)
+    return utils.load_dataset(fname, mask, smooth=smooth, zscore=zscore,
+                              zscore_by_rest=zscore_by_rest, rest_starts=rest_starts,
+                              rest_ends=rest_ends)
 
 class FMriActivationBlock(object):
-    def __init__(self, zscore=True, smooth=None):
+    def __init__(self, zscore=True, zscore_by_rest=False, smooth=None):
         self._zscore = zscore
+        self._zscore_by_rest = zscore_by_rest
         self.smooth = smooth
         self.filename = ''
         self.mask = None
@@ -34,6 +40,8 @@ class FMriActivationBlock(object):
         self.block = 0
         self.start_time = None
         self.end_time = None
+        self.rest_start_times = None
+        self.rest_end_times = None
         self.activations = None
         self.locations = None
         self.individual_differences = {}
@@ -41,7 +49,8 @@ class FMriActivationBlock(object):
     def load(self):
         self.activations, self.locations, _, _ =\
             lru_load_dataset(self.filename, self.mask, self._zscore,
-                             self.smooth)
+                             self.smooth, self._zscore_by_rest,
+                             self.rest_start_times,self.rest_end_times)
         if self.start_time is None:
             self.start_time = 0
         if self.end_time is None:
@@ -71,6 +80,20 @@ class FMriActivationsDb:
         self.mask = mask
         self.smooth = smooth
 
+    def inference_filter(self, training=True, held_out_subjects=set(),
+                         held_out_tasks=set()):
+        subjects = OrderedSet([b.subject for b in self.all()])
+        subjects = subjects - held_out_subjects
+        tasks = OrderedSet([b.task for b in self.all()]) - held_out_tasks
+        diagonals = list(utils.striping_diagonal_indices(len(subjects),
+                                                         len(tasks)))
+        def result(b):
+            subject_index = subjects.index(b.subject)
+            task_index = tasks.index(b.task)
+            return ((subject_index, task_index) in diagonals) == (not training)
+
+        return result
+
     def insert(self, block):
         if self.mask is not None:
             block.mask = self.mask
@@ -95,8 +118,13 @@ class FMriActivationsDb:
         del block_dict['locations']
         block_dict['individual_differences'] =\
             json.dumps(block_dict['individual_differences'])
+        block_dict['rest_start_times'] =\
+            json.dumps(block_dict['rest_start_times'])
+        block_dict['rest_end_times'] =\
+            json.dumps(block_dict['rest_end_times'])
         self._table.upsert(block_dict, ['subject', 'run', 'task', 'block',
                                         'start_time', 'end_time',
+                                        'rest_start_times', 'rest_end_times',
                                         'individual_differences'])
 
     def __getattr__(self, name):
@@ -128,28 +156,10 @@ class FMriActivationsDb:
         return attr
 
 def query_max_time(qiter):
-    result = -1
-    for block in qiter:
-        load = block.activations is None
-        if load:
-            block.load()
-        if result < 0 or block.end_time > result:
-            result = block.end_time
-        if load:
-            block.unload()
-    return result
+    return max([block.end_time - block.start_time for block in qiter])
 
 def query_min_time(qiter):
-    result = -1
-    for block in qiter:
-        load = block.activations is None
-        if load:
-            block.load()
-        if result < 0 or block.end_time < result:
-            result = block.end_time
-        if load:
-            block.unload()
-    return result
+    return min([block.end_time - block.start_time for block in qiter])
 
 class QueryDataset(torch.utils.data.Dataset):
     def __init__(self, qiter):

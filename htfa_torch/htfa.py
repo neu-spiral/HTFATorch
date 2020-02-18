@@ -45,9 +45,11 @@ from . import utils
 
 class HierarchicalTopographicFactorAnalysis:
     """Overall container for a run of TFA"""
-    def __init__(self, query, mask, num_factors=tfa_models.NUM_FACTORS):
+    def __init__(self, query, mask, num_factors=tfa_models.NUM_FACTORS,
+                 query_name=None):
         self.num_factors = num_factors
         self.mask = mask
+        self._common_name = query_name
         self._blocks = list(query)
         for block in self._blocks:
             block.load()
@@ -76,7 +78,8 @@ class HierarchicalTopographicFactorAnalysis:
     def train(self, num_steps=10, learning_rate=tfa.LEARNING_RATE,
               log_level=logging.WARNING, num_particles=tfa_models.NUM_PARTICLES,
               batch_size=64, use_cuda=True, blocks_batch_size=4,
-              checkpoint_steps=None, blocks_filter=lambda block: True):
+              checkpoint_steps=None, train_globals=True,
+              blocks_filter=lambda block: True):
         """Optimize the variational guide to reflect the data for `num_steps`"""
         logging.basicConfig(format='%(asctime)s %(message)s',
                             datefmt='%m/%d/%Y %H:%M:%S',
@@ -94,8 +97,19 @@ class HierarchicalTopographicFactorAnalysis:
         if tfa.CUDA and use_cuda:
             enc.cuda()
             dec.cuda()
-        optimizer = torch.optim.Adam(list(self.enc.parameters()),
-                                     lr=learning_rate, amsgrad=True)
+        param_groups = [{
+            'params': [phi for phi in self.enc.parameters()
+                       if phi.shape[0] == len(self._blocks)],
+            'lr': learning_rate,
+        }]
+        if train_globals:
+            param_groups.append({
+                'params': [phi for phi in self.enc.parameters()
+                           if phi.shape[0] != len(self._blocks)],
+                'lr': learning_rate,
+            })
+        optimizer = torch.optim.Adam(param_groups, lr=learning_rate,
+                                     amsgrad=True)
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer, factor=1e-1, min_lr=5e-5
         )
@@ -190,7 +204,8 @@ class HierarchicalTopographicFactorAnalysis:
         return np.vstack([free_energies])
 
     def free_energy(self, batch_size=64, use_cuda=True, blocks_batch_size=4,
-                    blocks_filter=lambda block: True, num_particles=1):
+                    blocks_filter=lambda block: True, num_particles=1,
+                    sample_size=10):
         training_blocks = [(b, block) for (b, block) in enumerate(self._blocks)
                            if blocks_filter(block)]
         activations_loader = torch.utils.data.DataLoader(
@@ -201,58 +216,69 @@ class HierarchicalTopographicFactorAnalysis:
         )
         enc = self.enc
         dec = self.dec
+        log_likelihoods = torch.zeros(sample_size, len(activations_loader))
+        prior_kls = torch.zeros(sample_size, len(activations_loader))
         if tfa.CUDA and use_cuda:
             enc.cuda()
             dec.cuda()
             cuda_locations = self.voxel_locations.cuda()
-        log_likelihoods = torch.zeros(len(activations_loader))
-        prior_kls = torch.zeros(len(activations_loader))
+            log_likelihoods = log_likelihoods.to(cuda_locations)
+            prior_kls = prior_kls.to(cuda_locations)
 
-        for (batch, data) in enumerate(activations_loader):
-            log_likelihoods[batch] = 0.0
-            prior_kls[batch] = 0.0
+        for k in range(sample_size // num_particles):
+            for (batch, data) in enumerate(activations_loader):
+                block_batches = utils.chunks(list(range(len(training_blocks))),
+                                             n=blocks_batch_size)
+                for block_batch in block_batches:
+                    activations = [{'Y': data[:, b, :]} for b in block_batch]
+                    block_batch = [training_blocks[b][0] for b in block_batch]
+                    if tfa.CUDA and use_cuda:
+                        for b in block_batch:
+                            dec.likelihoods[b].voxel_locations = cuda_locations
+                        for acts in activations:
+                            acts['Y'] = acts['Y'].cuda()
+                    trs = (batch * batch_size, None)
+                    trs = (trs[0], trs[0] + activations[0]['Y'].shape[0])
 
-            block_batches = utils.chunks(list(range(len(training_blocks))),
-                                         n=blocks_batch_size)
-            for block_batch in block_batches:
-                activations = [{'Y': data[:, b, :]} for b in block_batch]
-                block_batch = [training_blocks[b][0] for b in block_batch]
-                if tfa.CUDA and use_cuda:
-                    for b in block_batch:
-                        dec.likelihoods[b].voxel_locations = cuda_locations
-                    for acts in activations:
-                        acts['Y'] = acts['Y'].cuda()
-                trs = (batch * batch_size, None)
-                trs = (trs[0], trs[0] + activations[0]['Y'].shape[0])
+                    q = probtorch.Trace()
+                    enc(q, times=trs, num_particles=num_particles,
+                        blocks=block_batch)
+                    p = probtorch.Trace()
+                    dec(p, times=trs, guide=q, observations=activations,
+                        blocks=block_batch)
 
-                q = probtorch.Trace()
-                enc(q, times=trs, num_particles=num_particles,
-                    blocks=block_batch)
-                p = probtorch.Trace()
-                dec(p, times=trs, guide=q, observations=activations,
-                    blocks=block_batch)
+                    _, ll, prior_kl = tfa.hierarchical_free_energy(
+                        q, p, num_particles=num_particles
+                    )
 
-                _, ll, prior_kl = tfa.hierarchical_free_energy(
-                    q, p, num_particles=num_particles
-                )
+                    start = k * num_particles
+                    end = (k + 1) * num_particles
+                    log_likelihoods[start:end, batch] += ll.detach()
+                    prior_kls[start:end, batch] += prior_kl.detach()
 
-                log_likelihoods[batch] += ll.detach()
-                prior_kls[batch] += prior_kl.detach()
-
-                if tfa.CUDA and use_cuda:
-                    del activations
-                    for b in block_batch:
-                        dec.likelihoods[b].voxel_locations =\
-                            self.voxel_locations
-                    torch.cuda.empty_cache()
+                    if tfa.CUDA and use_cuda:
+                        del activations
+                        for b in block_batch:
+                            dec.likelihoods[b].voxel_locations =\
+                                self.voxel_locations
+                        torch.cuda.empty_cache()
 
         if tfa.CUDA and use_cuda:
             dec.cpu()
             enc.cpu()
+            log_likelihoods = log_likelihoods.cpu()
+            prior_kls = prior_kls.cpu()
 
-        log_likelihood = log_likelihoods.sum(dim=0).item()
-        prior_kl = prior_kls.sum(dim=0).item()
-        return -(log_likelihood - prior_kl), log_likelihood, prior_kl
+        log_likelihood = log_likelihoods.sum(dim=-1)
+        prior_kl = prior_kls.sum(dim=-1)
+        elbo = log_likelihood - prior_kl
+        iwae_log_likelihood = probtorch.util.log_mean_exp(log_likelihood,
+                                                          dim=0).item()
+        iwae_prior_kl = probtorch.util.log_mean_exp(prior_kl, dim=0).item()
+        iwae_free_energy = probtorch.util.log_mean_exp(-elbo, dim=0).item()
+        return [[-elbo.mean(dim=0).item(), log_likelihood.mean(dim=0).item(),
+                 prior_kl.mean(dim=0).item()],
+                [iwae_free_energy, iwae_log_likelihood, iwae_prior_kl]]
 
     def save(self, out_dir='.'):
         '''Save a HierarchicalTopographicFactorAnalysis'''
@@ -286,12 +312,14 @@ class HierarchicalTopographicFactorAnalysis:
         else:
             centers = hyperparams['template']['factor_centers']['mu'].data
             log_widths = hyperparams['template']['factor_log_widths']['mu'].data
+            weights = hyperparams['block']['weights']['mu'].mean(dim=0)
 
             result = {
                 'factors': tfa_models.radial_basis(self.voxel_locations,
                                                    centers, log_widths),
                 'factor_centers': centers,
                 'factor_log_widths': log_widths,
+                'weights': weights[:max(self.num_times)],
             }
 
         return result
@@ -365,7 +393,7 @@ class HierarchicalTopographicFactorAnalysis:
                 hyperparams['template']['factor_log_widths']['mu']
 
         if block is not None:
-            title = "Block %d (Participant %d, Run %d, Stimulus: %s)" %\
+            title = "Block %d (Participant %s, Run %d, Stimulus: %s)" %\
                   (block, self._blocks[block].subject, self._blocks[block].run,
                    labeler(self._blocks[block]))
         else:
@@ -390,39 +418,35 @@ class HierarchicalTopographicFactorAnalysis:
 
         return plot
 
-    def sample(self, times=None, posterior_predictive=False):
-        q = probtorch.Trace()
-        if posterior_predictive:
-            self.enc(q, times=times, num_particles=1)
-        p = probtorch.Trace()
-        self.dec(p, times=times, guide=q,
-                 observations=[q for b in range(self.num_blocks)])
-        return p, q
-
     def plot_original_brain(self, block=None, filename='', show=True,
-                            plot_abs=False, t=0, labeler=None, plot_mean=False, **kwargs):
+                            plot_abs=False, t=0, labeler=None, zscore_bound=3,
+                            **kwargs):
         if block is None:
             block = np.random.choice(self.num_blocks, 1)[0]
         if self.activation_normalizers is None:
             self.normalize_activations()
+        if zscore_bound is None:
+            zscore_bound = self.activation_normalizers[block]
         if labeler is None:
             labeler = lambda b: None
-        if filename == '':
-            filename = self.common_name() + str(block) + '_original_brain.pdf'
+        if filename == '' and t is None:
+            filename = '%s-%s_original_brain.pdf' % (self.common_name(),
+                                                     str(block))
+        elif filename == '':
+            filename = '%s-%s_original_brain_tr%d.pdf'
+            filename = filename % (self.common_name(), str(block), t)
 
         image = utils.cmu2nii(self.voxel_activations[block].numpy(),
                               self.voxel_locations.numpy(),
                               self._templates[block])
-        if plot_mean:
+        if t is None:
             image_slice = nilearn.image.mean_img(image)
         else:
             image_slice = nilearn.image.index_img(image, t)
         plot = niplot.plot_glass_brain(
             image_slice, plot_abs=plot_abs, colorbar=True, symmetric_cbar=True,
-            title=utils.title_brain_plot(block, self._blocks[block], labeler),
-            vmin=-self.activation_normalizers[block],
-            vmax=self.activation_normalizers[block],
-            **kwargs,
+            title=utils.title_brain_plot(block, self._blocks[block], labeler, t),
+            vmin=-zscore_bound, vmax=zscore_bound, **kwargs,
         )
 
         if filename is not None:
@@ -432,46 +456,64 @@ class HierarchicalTopographicFactorAnalysis:
 
         return plot
 
-    def plot_reconstruction(self, block=None, filename='', show=True,
-                            plot_abs=False, t=0, labeler=None, plot_mean=False,**kwargs):
-        results = self.results()
-        if self.activation_normalizers is None:
-            self.normalize_activations()
-        if labeler is None:
-            labeler = lambda b: None
-        if filename == '':
-            filename = self.common_name() + str(block) + '_htfa_reconstruction.pdf'
-
+    def posterior_reconstruction(self, block=None, t=0):
         results = self.results(block)
-        factor_centers = results['factor_centers']
-        factor_log_widths = results['factor_log_widths']
-        if block is not None:
-            weights = results['weights']
-        else:
-            block = np.random.choice(self.num_blocks, 1)[0]
-            weights = self.enc.hyperparams.state_vardict()['block']['weights']['mu'][block]
 
         factors = tfa_models.radial_basis(
-            self.voxel_locations, factor_centers,
-            factor_log_widths
+            self.voxel_locations, results['factor_centers'],
+            results['factor_log_widths']
         )
-        times = (0, self.voxel_activations[block].shape[0])
-        reconstruction = weights[times[0]:times[1], :] @ factors
+        if block:
+            times = (0, self.num_times[block])
+            template = self._templates[block]
+        else:
+            times = (0, max(self.num_times))
+            template = self._templates[0]
+        reconstruction = results['weights'][times[0]:times[1], :] @ factors
+        reconstruction = reconstruction.detach()
 
         image = utils.cmu2nii(reconstruction.numpy(),
-                              self.voxel_locations.numpy(),
-                              self._templates[block])
-        if plot_mean:
+                              self.voxel_locations.numpy(), template)
+        if t is None:
             image_slice = nilearn.image.mean_img(image)
+            reconstruction = reconstruction.mean(dim=0)
         else:
             image_slice = nilearn.image.index_img(image, t)
+            reconstruction = reconstruction[t]
+
+        return image_slice, reconstruction
+
+    def posterior_predictive_reconstruction(self):
+        return self.posterior_reconstruction(None, None)
+
+    def plot_reconstruction(self, block=None, filename='', show=True,
+                            plot_abs=False, t=0, labeler=None, zscore_bound=3,
+                            blocks_filter=lambda block: True, **kwargs):
+        if self.activation_normalizers is None:
+            self.normalize_activations()
+        if zscore_bound is None and block:
+            zscore_bound = self.activation_normalizers[block]
+        if labeler is None:
+            labeler = lambda b: None
+        if filename == '' and t is None:
+            filename = '%s-%s_htfa_reconstruction.pdf' % (self.common_name(),
+                                                          str(block))
+        elif filename == '':
+            filename = '%s-%s_htfa_reconstruction_tr%d.pdf'
+            filename = filename % (self.common_name(), str(block), t)
+
+        if blocks_filter(self._blocks[block]):
+            image_slice, reconstruction = self.posterior_reconstruction(
+                block=block, t=t
+            )
+        else:
+            image_slice, reconstruction =\
+                self.posterior_predictive_reconstruction()
         plot = niplot.plot_glass_brain(
             image_slice, plot_abs=plot_abs, colorbar=True, symmetric_cbar=True,
-            title=utils.title_brain_plot(block, self._blocks[block], labeler,
+            title=utils.title_brain_plot(block, self._blocks[block], labeler, t,
                                          'HTFA'),
-            vmin=-self.activation_normalizers[block],
-            vmax=self.activation_normalizers[block],
-            **kwargs,
+            vmin=-zscore_bound, vmax=zscore_bound, **kwargs,
         )
 
         logging.info(
@@ -489,7 +531,65 @@ class HierarchicalTopographicFactorAnalysis:
 
         return plot
 
+    def plot_reconstruction_diff(self, block, filename='', show=True,
+                                 plot_abs=False, t=0, labeler=lambda b: None,
+                                 zscore_bound=3, **kwargs):
+        if filename == '' and t is None:
+            filename = '%s-%s_htfa_reconstruction_diff.pdf'
+            filename = filename % (self.common_name(), str(block))
+        elif filename == '':
+            filename = '%s-%s_htfa_reconstruction_diff_tr%d.pdf'
+            filename = filename % (self.common_name(), str(block), t)
+
+        results = self.results(block)
+        factor_centers = results['factor_centers']
+        factor_log_widths = results['factor_log_widths']
+        if block is not None:
+            weights = results['weights']
+        else:
+            block = np.random.choice(self.num_blocks, 1)[0]
+            weights = self.enc.hyperparams.state_vardict()['block']['weights']['mu'][block]
+
+        factors = tfa_models.radial_basis(
+            self.voxel_locations, factor_centers,
+            factor_log_widths
+        )
+        times = (0, self.voxel_activations[block].shape[0])
+        reconstruction = weights[times[0]:times[1], :] @ factors
+
+        diff = self.voxel_activations[block] - reconstruction
+        if zscore_bound is None:
+            zscore_bound = diff.max().item()
+        image = utils.cmu2nii(diff.numpy() ** 2, self.voxel_locations.numpy(),
+                              self._templates[block])
+
+        if t is None:
+            image_slice = nilearn.image.mean_img(image)
+        else:
+            image_slice = nilearn.image.index_img(image, t)
+        plot = niplot.plot_glass_brain(
+            image_slice, plot_abs=plot_abs, colorbar=True, symmetric_cbar=False,
+            title=utils.title_brain_plot(block, self._blocks[block], labeler, t,
+                                         'Squared Residual'),
+            vmin=0, vmax=zscore_bound ** 2, **kwargs,
+        )
+
+        logging.info(
+            'Reconstruction Error (Frobenius Norm): %.8e out of %.8e',
+            np.linalg.norm(diff.numpy()),
+            np.linalg.norm(self.voxel_activations[block].numpy())
+        )
+
+        if filename is not None:
+            plot.savefig(filename)
+        if show:
+            niplot.show()
+
+        return plot
+
     def common_name(self):
+        if self._common_name:
+            return self._common_name
         return os.path.commonprefix([os.path.basename(b.filename)
                                      for b in self._blocks])
 
@@ -596,18 +696,21 @@ class HierarchicalTopographicFactorAnalysis:
         if show:
             plt.show()
 
-    def average_reconstruction_error(self, weighted=True):
+    def average_reconstruction_error(self, weighted=True,
+                                     blocks_filter=lambda block: True):
         if self.activation_normalizers is None:
             self.normalize_activations()
+        blocks = [block for block in range(self.num_blocks)
+                  if blocks_filter(self._blocks[block])]
 
         if weighted:
             return utils.average_weighted_reconstruction_error(
-                self.num_blocks, self.num_times, self.num_voxels,
+                blocks, self.num_times, self.num_voxels,
                 self.voxel_activations, self.results
             )
         else:
             return utils.average_reconstruction_error(
-                self.num_blocks, self.voxel_activations, self.results
+                blocks, self.voxel_activations, self.results
             )
 
     def decoding_accuracy(self, restvtask=False, window_size=5):

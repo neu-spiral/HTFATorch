@@ -66,13 +66,14 @@ def hierarchical_elbo(q, p, rv_weight=lambda x, prior=True: 1.0,
                                  nodes=[rv]) -\
                      q.log_joint(sample_dims=(sample_dim,), batch_dim=batch_dim,
                                  nodes=[rv])
-        if sample_dim is not None:
-            local_elbo = dreg_iwae_elbo_term(local_elbo, sample_dim=sample_dim)
         if p[rv].observed and rv not in q:
             weighted_log_likelihood += rv_weight(rv, False) * local_elbo
         else:
             weighted_prior_kl -= rv_weight(rv, True) * local_elbo
     weighted_elbo = weighted_log_likelihood - weighted_prior_kl
+    if sample_dim is not None:
+        weighted_elbo = dreg_iwae_elbo_term(weighted_elbo,
+                                            sample_dim=sample_dim)
     return weighted_elbo, weighted_log_likelihood, weighted_prior_kl
 
 def componentized_elbo(q, p, rv_weight=lambda x: 1.0,

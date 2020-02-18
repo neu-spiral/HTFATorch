@@ -47,8 +47,10 @@ EPOCH_MSG = '[Epoch %d] (%dms) Posterior free-energy %.8e = KL from prior %.8e -
 class DeepTFA:
     """Overall container for a run of Deep TFA"""
     def __init__(self, query, mask, num_factors=tfa_models.NUM_FACTORS,
-                 embedding_dim=2):
+                 embedding_dim=2, model_time_series=True, query_name=None):
         self.num_factors = num_factors
+        self._time_series = model_time_series
+        self._common_name = query_name
         self.mask = mask
         self._blocks = list(query)
         for block in self._blocks:
@@ -64,8 +66,8 @@ class DeepTFA:
         self._templates = [block.filename for block in self._blocks]
         self._tasks = [block.task for block in self._blocks]
 
-        self.weight_normalizers = None
         self.activation_normalizers = None
+        self.activation_sufficient_stats = None
         self.normalize_activations()
 
         # Pull out relevant dimensions: the number of time instants and the
@@ -97,7 +99,8 @@ class DeepTFA:
         }
 
         self.decoder = dtfa_models.DeepTFADecoder(self.num_factors, hyper_means,
-                                                  embedding_dim)
+                                                  embedding_dim,
+                                                  time_series=model_time_series)
         self.generative = dtfa_models.DeepTFAModel(
             self.voxel_locations, block_subjects, block_tasks,
             self.num_factors, self.num_blocks, self.num_times, embedding_dim
@@ -106,7 +109,8 @@ class DeepTFA:
                                                     block_subjects, block_tasks,
                                                     self.num_blocks,
                                                     self.num_times,
-                                                    embedding_dim, hyper_means)
+                                                    embedding_dim, hyper_means,
+                                                    model_time_series)
 
     def subjects(self):
         return OrderedSet([b.subject for b in self._blocks])
@@ -122,7 +126,7 @@ class DeepTFA:
     def train(self, num_steps=10, learning_rate=tfa.LEARNING_RATE,
               log_level=logging.WARNING, num_particles=tfa_models.NUM_PARTICLES,
               batch_size=64, use_cuda=True, checkpoint_steps=None,
-              blocks_batch_size=4, patience=10, train_generative=True,
+              blocks_batch_size=4, patience=10, train_globals=True,
               blocks_filter=lambda block: True):
         """Optimize the variational guide to reflect the data for `num_steps`"""
         logging.basicConfig(format='%(asctime)s %(message)s',
@@ -150,11 +154,27 @@ class DeepTFA:
                 'q': learning_rate,
                 'p': learning_rate / 10,
             }
-        param_groups = [{'params': variational.parameters(),
-                         'lr': learning_rate['q']}]
-        if train_generative:
-            param_groups.append({'params': decoder.parameters(),
-                                 'lr': learning_rate['p']})
+
+        param_groups = [{
+            'params': [phi for phi in variational.parameters()
+                       if phi.shape[0] == len(self._blocks)],
+            'lr': learning_rate['q'],
+        }, {
+            'params': [theta for theta in decoder.parameters()
+                       if theta.shape[0] == len(self._blocks)],
+            'lr': learning_rate['p'],
+        }]
+        if train_globals:
+            param_groups.append({
+                'params': [phi for phi in variational.parameters()
+                           if phi.shape[0] != len(self._blocks)],
+                'lr': learning_rate['q'],
+            })
+            param_groups.append({
+                'params': [theta for theta in decoder.parameters()
+                           if theta.shape[0] != len(self._blocks)],
+                'lr': learning_rate['p'],
+            })
         optimizer = torch.optim.Adam(param_groups, amsgrad=True, eps=1e-4)
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer, factor=0.5, min_lr=1e-5, patience=patience,
@@ -261,15 +281,22 @@ class DeepTFA:
         return np.vstack([free_energies])
 
     def free_energy(self, batch_size=64, use_cuda=True, blocks_batch_size=4,
-                    blocks_filter=lambda block: True, num_particles=1):
-        training_blocks = [(b, block) for (b, block) in enumerate(self._blocks)
-                           if blocks_filter(block)]
+                    blocks_filter=lambda block: True, num_particles=1,
+                    sample_size=10, predictive=False):
+        testing_blocks = [(b, block) for (b, block) in enumerate(self._blocks)
+                          if blocks_filter(block)]
         activations_loader = torch.utils.data.DataLoader(
-            utils.TFADataset([block.activations
-                              for (_, block) in training_blocks]),
+            utils.TFADataset([block.activations.detach()
+                              for (_, block) in testing_blocks]),
             batch_size=batch_size,
             pin_memory=True,
         )
+        log_likelihoods = torch.zeros(sample_size, len(activations_loader))
+        prior_kls = torch.zeros(sample_size, len(activations_loader))
+
+        self.decoder.eval()
+        self.variational.eval()
+        self.generative.eval()
         decoder = self.decoder
         variational = self.variational
         generative = self.generative
@@ -277,57 +304,66 @@ class DeepTFA:
             decoder.cuda()
             variational.cuda()
             generative.cuda()
-            cuda_locations = self.voxel_locations.cuda()
-        log_likelihoods = torch.zeros(len(activations_loader))
-        prior_kls = torch.zeros(len(activations_loader))
+            cuda_locations = self.voxel_locations.cuda().detach()
+            log_likelihoods = log_likelihoods.to(cuda_locations)
+            prior_kls = prior_kls.to(cuda_locations)
 
-        for (batch, data) in enumerate(activations_loader):
-            log_likelihoods[batch] = 0.0
-            prior_kls[batch] = 0.0
+        for k in range(sample_size // num_particles):
+            for (batch, data) in enumerate(activations_loader):
+                block_batches = utils.chunks(list(range(len(testing_blocks))),
+                                             n=blocks_batch_size)
+                for block_batch in block_batches:
+                    activations = [{'Y': data[:, b, :]} for b in block_batch]
+                    block_batch = [testing_blocks[b][0] for b in block_batch]
+                    if tfa.CUDA and use_cuda:
+                        for b in block_batch:
+                            generative.likelihoods[b].voxel_locations =\
+                                cuda_locations
+                        for acts in activations:
+                            acts['Y'] = acts['Y'].cuda()
+                    trs = (batch * batch_size, None)
+                    trs = (trs[0], trs[0] + activations[0]['Y'].shape[0])
 
-            block_batches = utils.chunks(list(range(len(training_blocks))),
-                                         n=blocks_batch_size)
-            for block_batch in block_batches:
-                activations = [{'Y': data[:, b, :]} for b in block_batch]
-                block_batch = [training_blocks[b][0] for b in block_batch]
-                if tfa.CUDA and use_cuda:
-                    for b in block_batch:
-                        generative.likelihoods[b].voxel_locations =\
-                            cuda_locations
-                    for acts in activations:
-                        acts['Y'] = acts['Y'].cuda()
-                trs = (batch * batch_size, None)
-                trs = (trs[0], trs[0] + activations[0]['Y'].shape[0])
+                    q = probtorch.Trace()
+                    variational(decoder, q, times=trs, blocks=block_batch,
+                                num_particles=num_particles)
+                    p = probtorch.Trace()
+                    generative(decoder, p, times=trs, guide=q,
+                               observations=activations, blocks=block_batch)
 
-                q = probtorch.Trace()
-                variational(decoder, q, times=trs, blocks=block_batch,
-                            num_particles=num_particles)
-                p = probtorch.Trace()
-                generative(decoder, p, times=trs, guide=q,
-                           observations=activations, blocks=block_batch)
+                    _, ll, prior_kl = tfa.hierarchical_free_energy(
+                        q, p, num_particles=num_particles
+                    )
 
-                _, ll, prior_kl = tfa.hierarchical_free_energy(
-                    q, p, num_particles=num_particles
-                )
+                    start = k * num_particles
+                    end = (k + 1) * num_particles
+                    log_likelihoods[start:end, batch] += ll.detach()
+                    prior_kls[start:end, batch] += prior_kl.detach()
 
-                log_likelihoods[batch] += ll.detach()
-                prior_kls[batch] += prior_kl.detach()
-
-                if tfa.CUDA and use_cuda:
-                    del activations
-                    for b in block_batch:
-                        generative.likelihoods[b].voxel_locations =\
-                            self.voxel_locations
-                    torch.cuda.empty_cache()
+                    if tfa.CUDA and use_cuda:
+                        del activations
+                        for b in block_batch:
+                            generative.likelihoods[b].voxel_locations =\
+                                self.voxel_locations
+                        torch.cuda.empty_cache()
 
         if tfa.CUDA and use_cuda:
             decoder.cpu()
             variational.cpu()
             generative.cpu()
+            log_likelihoods = log_likelihoods.cpu()
+            prior_kls = prior_kls.cpu()
 
-        log_likelihood = log_likelihoods.sum(dim=0).item()
-        prior_kl = prior_kls.sum(dim=0).item()
-        return -(log_likelihood - prior_kl), log_likelihood, prior_kl
+        log_likelihood = log_likelihoods.sum(dim=-1)
+        prior_kl = prior_kls.sum(dim=-1)
+        elbo = log_likelihood - prior_kl
+        iwae_log_likelihood = probtorch.util.log_mean_exp(log_likelihood,
+                                                          dim=0).item()
+        iwae_prior_kl = probtorch.util.log_mean_exp(prior_kl, dim=0).item()
+        iwae_free_energy = probtorch.util.log_mean_exp(-elbo, dim=0).item()
+        return [[-elbo.mean(dim=0).item(), log_likelihood.mean(dim=0).item(),
+                 prior_kl.mean(dim=0).item()],
+                [iwae_free_energy, iwae_log_likelihood, iwae_prior_kl]]
 
     def results(self, block=None, subject=None, task=None, hist_weights=False):
         hyperparams = self.variational.hyperparams.state_vardict()
@@ -381,16 +417,17 @@ class DeepTFA:
                     value=hyperparams['task']['mu'][:, task],
                     name='z^S_{%d,%d}' % (task, b),
                 )
-            for k, v in hyperparams['weights'].items():
-                hyperparams['weights'][k] = v[:, :, times[0]:times[1]]
-            weights_params = hyperparams['weights']
-            guide.variable(
-                torch.distributions.Normal,
-                weights_params['mu'][:, b],
-                softplus(weights_params['sigma'][:, b]),
-                value=weights_params['mu'][:, b],
-                name='Weights%d_%d-%d' % (b, times[0], times[1])
-            )
+            if self._time_series:
+                for k, v in hyperparams['weights'].items():
+                    hyperparams['weights'][k] = v[:, :, times[0]:times[1]]
+                weights_params = hyperparams['weights']
+                guide.variable(
+                    torch.distributions.Normal,
+                    weights_params['mu'][:, b],
+                    softplus(weights_params['sigma'][:, b]),
+                    value=weights_params['mu'][:, b],
+                    name='Weights%d_%d-%d' % (b, times[0], times[1])
+                )
 
         weights, factor_centers, factor_log_widths =\
             self.decoder(probtorch.Trace(), blocks, block_subjects, block_tasks,
@@ -422,35 +459,65 @@ class DeepTFA:
             result['z^S_%d' % task] = hyperparams['task']['mu'][:, task]
         return result
 
-    def reconstruction(self, block=None, subject=None, task=None):
+    def reconstruction(self, block=None, subject=None, task=None, t=0):
         results = self.results(block, subject, task)
-        return results['weights'] @ results['factors']
+        reconstruction = results['weights'] @ results['factors']
 
-    def reconstruction_diff(self, block):
-        reconstruction = self.reconstruction(block)
-        return self.voxel_activations[block] - reconstruction
+        image = utils.cmu2nii(reconstruction.numpy(),
+                              self.voxel_locations.numpy(),
+                              self._templates[block])
+        if t is None:
+            image_slice = nilearn.image.mean_img(image)
+            reconstruction = reconstruction.mean(dim=0)
+        else:
+            image_slice = nilearn.image.index_img(image, t)
+            reconstruction = reconstruction[t]
+        return image_slice, reconstruction
+
+    def reconstruction_diff(self, block, t=0, zscore_bound=3):
+        results = self.results(block)
+        reconstruction = results['weights'] @ results['factors']
+        squared_diff = (self.voxel_activations[block] - reconstruction) ** 2
+
+        if zscore_bound is None:
+            zscore_bound = squared_diff.max().item()
+
+        image = utils.cmu2nii(squared_diff.numpy(),
+                              self.voxel_locations.numpy(),
+                              self._templates[block])
+        if t is None:
+            image_slice = nilearn.image.mean_img(image)
+            squared_diff = self.voxel_activations[block].mean(dim=0) -\
+                           reconstruction.mean(dim=0)
+        else:
+            image_slice = nilearn.image.index_img(image, t)
+            squared_diff = self.voxel_activations[block][t] - reconstruction[t]
+        squared_diff = squared_diff ** 2
+
+        return image_slice, squared_diff
 
     def plot_reconstruction_diff(self, block, filename='', show=True, t=0,
                                  plot_abs=False, labeler=lambda b: None,
-                                 **kwargs):
-        if filename == '':
-            filename = self.common_name() + str(block) + '_reconstruction_diff.pdf'
-        diff = self.reconstruction_diff(block)
-        image = utils.cmu2nii(diff.numpy(), self.voxel_locations.numpy(),
-                              self._templates[block])
-        image_slice = nilearn.image.index_img(image, t)
+                                 zscore_bound=3, **kwargs):
+        if filename == '' and t is None:
+            filename = '%s-%s_ntfa_reconstruction_diff.pdf'
+            filename = filename % (self.common_name(), str(block))
+        elif filename == '':
+            filename = '%s-%s_ntfa_reconstruction_diff_tr%d.pdf'
+            filename = filename % (self.common_name(), str(block), t)
+
+        image_slice, diff = self.reconstruction_diff(block, t=t,
+                                                     zscore_bound=zscore_bound)
         plot = niplot.plot_glass_brain(
-            image_slice, plot_abs=plot_abs, colorbar=True, symmetric_cbar=True,
-            title=utils.title_brain_plot(block, self._blocks[block], labeler,
-                                         'Reconstruction Error'),
-            vmin=-self.activation_normalizers[block],
-            vmax=self.activation_normalizers[block],
-            **kwargs,
+            image_slice, plot_abs=plot_abs, colorbar=True, symmetric_cbar=False,
+            title=utils.title_brain_plot(block, self._blocks[block], labeler, t,
+                                         'Squared Residual'),
+            vmin=0, vmax=zscore_bound ** 2, **kwargs,
         )
 
         logging.info(
             'Reconstruction Error (Frobenius Norm): %.8e out of %.8e',
-            np.linalg.norm(diff.numpy()),
+            np.linalg.norm(diff.sqrt().numpy()),
             np.linalg.norm(self.voxel_activations[block].numpy())
         )
 
@@ -464,24 +531,34 @@ class DeepTFA:
     def normalize_activations(self):
         subject_runs = OrderedSet([(block.subject, block.run)
                                    for block in self._blocks])
-        subject_run_normalizers = {sr: 0 for sr in subject_runs}
+        run_activations = {sr: None for sr in subject_runs}
 
         for block in range(len(self._blocks)):
             sr = (self._blocks[block].subject, self._blocks[block].run)
-            subject_run_normalizers[sr] = max(
-                subject_run_normalizers[sr],
-                torch.abs(self.voxel_activations[block]).max()
-            )
+            if run_activations[sr] is None:
+                run_activations[sr] = self.voxel_activations[block]
+            else:
+                run_activations[sr] = torch.cat((run_activations[sr],
+                                                 self.voxel_activations[block]),
+                                                dim=0)
+
+        for sr in run_activations:
+            run_activations[sr] = run_activations[sr].flatten()
 
         self.activation_normalizers =\
-            [subject_run_normalizers[(block.subject, block.run)]
+            [torch.abs(run_activations[(block.subject, block.run)]).max()
              for block in self._blocks]
+        self.activation_sufficient_stats = [
+            (torch.mean(run_activations[(block.subject, block.run)], dim=0),
+             torch.std(run_activations[(block.subject, block.run)], dim=0))
+            for block in self._blocks]
         return self.activation_normalizers
 
     def plot_factor_centers(self, block, filename='', show=True, t=None,
                             labeler=None, serialize_data=True):
         if filename == '':
-            filename = self.common_name() + str(block) + '_factor_centers.pdf'
+            filename = self.common_name() + '-' + str(block) +\
+                       '_factor_centers.pdf'
         if labeler is None:
             labeler = lambda b: None
         results = self.results(block)
@@ -504,7 +581,7 @@ class DeepTFA:
             np.vstack([centers, centers]),
             node_size=np.vstack([sizes, centers_sizes]),
             title=utils.title_brain_plot(block, self._blocks[block], labeler,
-                                         'Factor Centers'),
+                                         None, 'Factor Centers'),
         )
 
         if filename is not None:
@@ -515,9 +592,16 @@ class DeepTFA:
         return plot
 
     def plot_original_brain(self, block=None, filename='', show=True,
-                            plot_abs=False, t=0, labeler=None,plot_mean=False, **kwargs):
-        if filename == '':
-            filename = self.common_name() + str(block) + '_original_brain.pdf'
+                            plot_abs=False, t=0, labeler=None, zscore_bound=3,
+                            **kwargs):
+        if zscore_bound is None:
+            zscore_bound = self.activation_normalizers[block]
+        if filename == '' and t is None:
+            filename = '%s-%s_original_brain.pdf' % (self.common_name(),
+                                                     str(block))
+        elif filename == '':
+            filename = '%s-%s_original_brain_tr%d.pdf'
+            filename = filename % (self.common_name(), str(block), t)
         if labeler is None:
             labeler = lambda b: None
         if block is None:
@@ -528,16 +612,14 @@ class DeepTFA:
         image = utils.cmu2nii(self.voxel_activations[block].numpy(),
                               self.voxel_locations.numpy(),
                               self._templates[block])
-        if plot_mean:
+        if t is None:
             image_slice = nilearn.image.mean_img(image)
         else:
             image_slice = nilearn.image.index_img(image, t)
         plot = niplot.plot_glass_brain(
             image_slice, plot_abs=plot_abs, colorbar=True, symmetric_cbar=True,
-            title=utils.title_brain_plot(block, self._blocks[block], labeler),
-            vmin=-self.activation_normalizers[block],
-            vmax=self.activation_normalizers[block],
-            **kwargs,
+            title=utils.title_brain_plot(block, self._blocks[block], labeler, t),
+            vmin=-zscore_bound, vmax=zscore_bound, **kwargs,
         )
 
         if filename is not None:
@@ -547,24 +629,34 @@ class DeepTFA:
 
         return plot
 
-    def average_reconstruction_error(self, weighted=True):
+    def average_reconstruction_error(self, weighted=True,
+                                     blocks_filter=lambda block: True):
         if self.activation_normalizers is None:
             self.normalize_activations()
+        blocks = [block for block in range(self.num_blocks)
+                  if blocks_filter(self._blocks[block])]
 
         if weighted:
             return utils.average_weighted_reconstruction_error(
-                self.num_blocks, self.num_times, self.num_voxels,
+                blocks, self.num_times, self.num_voxels,
                 self.voxel_activations, self.results
             )
         else:
             return utils.average_reconstruction_error(
-                self.num_blocks, self.voxel_activations, self.results
+                blocks, self.voxel_activations, self.results
             )
 
     def plot_reconstruction(self, block=None, filename='', show=True,
-                            plot_abs=False, t=0, labeler=None,plot_mean=False, **kwargs):
-        if filename == '':
-            filename = self.common_name() + str(block) + '_ntfa_reconstruction.pdf'
+                            plot_abs=False, t=0, labeler=None, zscore_bound=3,
+                            **kwargs):
+        if zscore_bound is None:
+            zscore_bound = self.activation_normalizers[block]
+        if filename == '' and t is None:
+            filename = '%s-%s_ntfa_reconstruction.pdf' % (self.common_name(),
+                                                          str(block))
+        elif filename == '':
+            filename = '%s-%s_ntfa_reconstruction_tr%d.pdf'
+            filename = filename % (self.common_name(), str(block), t)
         if labeler is None:
             labeler = lambda b: None
         if block is None:
@@ -572,31 +664,23 @@ class DeepTFA:
         if self.activation_normalizers is None:
             self.normalize_activations()
 
-        results = self.results(block)
-
-        reconstruction = results['weights'] @ results['factors']
-
-        image = utils.cmu2nii(reconstruction.numpy(),
-                              self.voxel_locations.numpy(),
-                              self._templates[block])
-        if plot_mean:
-            image_slice = nilearn.image.mean_img(image)
-        else:
-            image_slice = nilearn.image.index_img(image, t)
+        image_slice, reconstruction = self.reconstruction(block=block, t=t)
         plot = niplot.plot_glass_brain(
             image_slice, plot_abs=plot_abs, colorbar=True, symmetric_cbar=True,
-            title=utils.title_brain_plot(block, self._blocks[block], labeler,
+            title=utils.title_brain_plot(block, self._blocks[block], labeler, t,
                                          'NeuralTFA'),
-            vmin=-self.activation_normalizers[block],
-            vmax=self.activation_normalizers[block],
-            **kwargs,
+            vmin=-zscore_bound, vmax=zscore_bound, **kwargs,
         )
+
+        activations = self.voxel_activations[block]
+        if t:
+            activations = activations[t]
+        else:
+            activations = activations.mean(dim=0)
 
         logging.info(
             'Reconstruction Error (Frobenius Norm): %.8e out of %.8e',
-            np.linalg.norm(
-                (self.voxel_activations[block] - reconstruction).numpy()
-            ),
+            np.linalg.norm((activations - reconstruction).numpy()),
             np.linalg.norm(self.voxel_activations[block].numpy())
         )
 
@@ -608,14 +692,18 @@ class DeepTFA:
         return plot
 
     def plot_subject_template(self, subject, filename='', show=True,
-                              plot_abs=False, serialize_data=True, **kwargs):
+                              plot_abs=False, serialize_data=True,
+                              zscore_bound=3, **kwargs):
         if filename == '':
-            filename = self.common_name() + str(subject) + '_subject_template.pdf'
+            filename = self.common_name() + '-' + str(subject) +\
+                       '_subject_template.pdf'
         i = self.subjects().index(subject)
         results = self.results(block=None, task=None, subject=i)
         template = [i for (i, b) in enumerate(self._blocks)
                     if b.subject == subject][0]
         reconstruction = results['weights'] @ results['factors']
+        if zscore_bound is None:
+            zscore_bound = self.activation_normalizers[template]
 
         image = utils.cmu2nii(reconstruction.numpy(),
                               self.voxel_locations.numpy(),
@@ -635,9 +723,7 @@ class DeepTFA:
         plot = niplot.plot_glass_brain(
             image_slice, plot_abs=plot_abs, colorbar=True, symmetric_cbar=True,
             title="Template for Participant %d" % subject,
-            vmin=-self.activation_normalizers[template],
-            vmax=self.activation_normalizers[template],
-            **kwargs,
+            vmin=-zscore_bound, vmax=zscore_bound, **kwargs,
         )
 
         if filename is not None:
@@ -648,14 +734,18 @@ class DeepTFA:
         return plot
 
     def plot_task_template(self, task, filename='', show=True, plot_abs=False,
-                           labeler=lambda x: x, serialize_data=True, **kwargs):
+                           labeler=lambda x: x, serialize_data=True,
+                           zscore_bound=3, **kwargs):
         if filename == '':
-            filename = self.common_name() + str(task) + '_task_template.pdf'
+            filename = self.common_name() + '-' + str(task) +\
+                       '_task_template.pdf'
         i = self.tasks().index(task)
         results = self.results(block=None, subject=None, task=i)
         template = [i for (i, b) in enumerate(self._blocks)
                     if b.task == task][0]
         reconstruction = results['weights'] @ results['factors']
+        if zscore_bound is None:
+            zscore_bound = self.activation_normalizers[template]
 
         image = utils.cmu2nii(reconstruction.numpy(),
                               self.voxel_locations.numpy(),
@@ -675,9 +765,7 @@ class DeepTFA:
         plot = niplot.plot_glass_brain(
             image_slice, plot_abs=plot_abs, colorbar=True, symmetric_cbar=True,
             title="Template for Stimulus '%s'" % labeler(task),
-            vmin=-self.activation_normalizers[template],
-            vmax=self.activation_normalizers[template],
-            **kwargs,
+            vmin=-zscore_bound, vmax=zscore_bound, **kwargs,
         )
 
         if filename is not None:
@@ -726,10 +814,74 @@ class DeepTFA:
 
         return plot, centers, log_widths
 
+    def heatmap_subject_embedding(self, heatmaps=[], filename='', show=True,
+                                  xlims=None, ylims=None, figsize=utils.FIGSIZE,
+                                  colormap=plt.rcParams['image.cmap'],
+                                  serialize_data=True, plot_ellipse=True,
+                                  legend_ordering=None, titles=[]):
+        if filename == '':
+            filename = self.common_name() + '_subject_heatmap.pdf'
+        hyperparams = self.variational.hyperparams.state_vardict()
+        z_p_mu = hyperparams['subject']['mu'].data
+        z_p_sigma = softplus(hyperparams['subject']['sigma'].data)
+        subjects = self.subjects()
+
+        minus_lims = torch.min(z_p_mu - z_p_sigma * 2, dim=0)[0].tolist()
+        plus_lims = torch.max(z_p_mu + z_p_sigma * 2, dim=0)[0].tolist()
+        if not xlims:
+            xlims = (minus_lims[0], plus_lims[0])
+        if not ylims:
+            ylims = (minus_lims[1], plus_lims[1])
+
+        if not heatmaps:
+            heatmaps = [lambda s: 1.0]
+        heats = [sorted([heatmap(s) for s in subjects]) for heatmap in heatmaps]
+
+        if serialize_data:
+            tensors_filename = os.path.splitext(filename)[0] + '.dat'
+            tensors = {
+                'z_p': {'mu': z_p_mu, 'sigma': z_p_sigma},
+                'colormap': colormap,
+                'z_heats': heats,
+            }
+            torch.save(tensors, tensors_filename)
+
+        with plt.style.context('seaborn-white'):
+            ncols = len(heatmaps)
+            if figsize is not None:
+                (w, h) = figsize
+                figsize = (w * ncols, h)
+
+            fig, axs = plt.subplots(nrows=1, ncols=ncols, facecolor='white',
+                                    sharey=True, figsize=figsize, frameon=True)
+            for c in range(ncols):
+                palette = cm.ScalarMappable(None, colormap)
+                subject_colors = palette.to_rgba(np.array(heats[c]), norm=True)
+                palette.set_array(np.array(heats[c]))
+
+                utils.plot_embedding_clusters(z_p_mu, z_p_sigma, subject_colors,
+                                              '', titles[c], palette, axs[c],
+                                              xlims=xlims, ylims=ylims,
+                                              plot_ellipse=plot_ellipse,
+                                              legend_ordering=legend_ordering,
+                                              color_legend=False)
+
+            fig.text(0.435, 0.05, '$z^P_1$', ha='center', va='center')
+            fig.text(0.1, 0.5, '$z^P_2$', ha='center', va='center',
+                     rotation='vertical')
+            palette.set_clim(0., 1.)
+            plt.colorbar(palette, ax=axs)
+
+            if filename is not None:
+                fig.savefig(filename)
+            if show:
+                fig.show()
+
     def scatter_subject_embedding(self, labeler=None, filename='', show=True,
                                   xlims=None, ylims=None, figsize=utils.FIGSIZE,
-                                  colormap='Accent', serialize_data=True,
-                                  plot_ellipse=True):
+                                  colormap=plt.rcParams['image.cmap'],
+                                  serialize_data=True, plot_ellipse=True,
+                                  legend_ordering=None):
         if filename == '':
             filename = self.common_name() + '_subject_embedding.pdf'
         hyperparams = self.variational.hyperparams.state_vardict()
@@ -767,16 +919,18 @@ class DeepTFA:
             }
             torch.save(tensors, tensors_filename)
 
-        utils.plot_embedding_clusters(z_p_mu, z_p_sigma, subject_colors,
-                                      'z^P', 'Participant Embeddings', palette,
-                                      filename=filename, show=show, xlims=xlims,
-                                      ylims=ylims, figsize=figsize,
-                                      plot_ellipse=plot_ellipse)
+        utils.embedding_clusters_fig(z_p_mu, z_p_sigma, subject_colors, 'z^P',
+                                     'Participant Embeddings', palette,
+                                     filename=filename, show=show, xlims=xlims,
+                                     ylims=ylims, figsize=figsize,
+                                     plot_ellipse=plot_ellipse,
+                                     legend_ordering=legend_ordering)
 
     def scatter_task_embedding(self, labeler=None, filename='', show=True,
                                xlims=None, ylims=None, figsize=utils.FIGSIZE,
-                               colormap='Accent', serialize_data=True,
-                               plot_ellipse=True):
+                               colormap=plt.rcParams['image.cmap'],
+                               serialize_data=True, plot_ellipse=True,
+                               legend_ordering=None):
         if filename == '':
             filename = self.common_name() + '_task_embedding.pdf'
         hyperparams = self.variational.hyperparams.state_vardict()
@@ -814,13 +968,16 @@ class DeepTFA:
             }
             torch.save(tensors, tensors_filename)
 
-        utils.plot_embedding_clusters(z_s_mu, z_s_sigma, task_colors,
-                                      'z^S', 'Stimulus Embeddings', palette,
-                                      filename=filename, show=show, xlims=xlims,
-                                      ylims=ylims, figsize=figsize,
-                                      plot_ellipse=plot_ellipse)
+        utils.embedding_clusters_fig(z_s_mu, z_s_sigma, task_colors, 'z^S',
+                                     'Stimulus Embeddings', palette,
+                                     filename=filename, show=show, xlims=xlims,
+                                     ylims=ylims, figsize=figsize,
+                                     plot_ellipse=plot_ellipse,
+                                     legend_ordering=legend_ordering)
 
     def common_name(self):
+        if self._common_name:
+            return self._common_name
         return os.path.commonprefix([os.path.basename(b.filename)
                                      for b in self._blocks])
 
