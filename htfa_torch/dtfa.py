@@ -26,6 +26,7 @@ import nilearn.image
 import nilearn.plotting as niplot
 import numpy as np
 from ordered_set import OrderedSet
+import itertools
 import scipy.io as sio
 import torch
 import torch.distributions as dists
@@ -77,8 +78,14 @@ class DeepTFA:
 
         subjects = self.subjects()
         tasks = self.tasks()
+        stimuli = self.stimuli()
+        interactions = OrderedSet(list(itertools.product(subjects,stimuli)))
+
         block_subjects = [subjects.index(b.subject) for b in self._blocks]
         block_tasks = [tasks.index(b.task) for b in self._blocks]
+        block_stimuli = [stimuli.index(b.individual_differences['stimulus']) for b in self._blocks]
+        block_interactions = [interactions.index((b.subject,b.individual_differences['stimulus']))
+                              for b in self._blocks]
 
         b = max(range(self.num_blocks), key=lambda b: self.num_times[b])
         init_activations = self.voxel_activations.copy()
@@ -102,11 +109,12 @@ class DeepTFA:
                                                   embedding_dim,
                                                   time_series=model_time_series)
         self.generative = dtfa_models.DeepTFAModel(
-            self.voxel_locations, block_subjects, block_tasks,
+            self.voxel_locations, block_subjects, block_tasks, block_stimuli, block_interactions,
             self.num_factors, self.num_blocks, self.num_times, embedding_dim
         )
         self.variational = dtfa_models.DeepTFAGuide(self.num_factors,
                                                     block_subjects, block_tasks,
+                                                    block_stimuli, block_interactions,
                                                     self.num_blocks,
                                                     self.num_times,
                                                     embedding_dim, hyper_means,
@@ -117,6 +125,9 @@ class DeepTFA:
 
     def tasks(self):
         return OrderedSet([b.task for b in self._blocks])
+
+    def stimuli(self):
+        return OrderedSet([b.individual_differences['stimulus'] for b in self._blocks])
 
     def num_parameters(self):
         parameters = list(self.variational.parameters()) +\
@@ -357,7 +368,7 @@ class DeepTFA:
                  prior_kl.mean(dim=0).item()],
                 [iwae_free_energy, iwae_log_likelihood, iwae_prior_kl]]
 
-    def results(self, block=None, subject=None, task=None, hist_weights=False):
+    def results(self, block=None, subject=None, task=None, interaction=None, hist_weights=False):
         hyperparams = self.variational.hyperparams.state_vardict()
         for k, v in hyperparams.items():
             hyperparams[k] = v.expand(1, *v.shape)
@@ -370,11 +381,13 @@ class DeepTFA:
             blocks = [block]
             block_subjects = [self.generative.block_subjects[block]]
             block_tasks = [self.generative.block_tasks[block]]
+            block_interactions = [self.generative.block_interactions[block]]
         else:
             times = (0, max(self.num_times))
             blocks = []
             block_subjects = self.generative.block_subjects
             block_tasks = self.generative.block_tasks
+            block_interactions = self.generative.block_interactions
 
         for b in blocks:
             if subject is not None:
@@ -409,6 +422,15 @@ class DeepTFA:
                     value=hyperparams['task']['mu'][:, task],
                     name='z^S_{%d,%d}' % (task, b),
                 )
+
+            if interaction is not None:
+                guide.variable(
+                    torch.distributions.Normal,
+                    hyperparams['interactions']['mu'][:, task],
+                    softplus(hyperparams['interactions']['sigma'][:, task]),
+                    value=hyperparams['interactions']['mu'][:, task],
+                    name='z^I_{%d,%d}' % (interaction , b),
+                )
             if self._time_series:
                 for k, v in hyperparams['weights'].items():
                     hyperparams['weights'][k] = v[:, :, times[0]:times[1]]
@@ -422,7 +444,7 @@ class DeepTFA:
                 )
 
         weights, factor_centers, factor_log_widths =\
-            self.decoder(probtorch.Trace(), blocks, block_subjects, block_tasks,
+            self.decoder(probtorch.Trace(), blocks, block_subjects, block_tasks, block_interactions,
                          hyperparams, times, guide=guide, num_particles=1)
 
         if block is not None:
@@ -447,8 +469,11 @@ class DeepTFA:
         }
         if subject is not None:
             result['z^P_%d' % subject] = hyperparams['subject']['mu'][:, subject]
+            result['z^PW_%d' % subject] = hyperparams['subject_weight']['mu'][:, subject]
         if task is not None:
-            result['z^S_%d' % task] = hyperparams['task']['mu'][:, task]
+            result['z^SW_%d' % task] = hyperparams['task_weight']['mu'][:, task]
+        if interaction is not None:
+            result['z^I_{%d}' % interaction] = hyperparams['interactions']['mu'][:, interaction]
         return result
 
     def reconstruction(self, block=None, subject=None, task=None, t=0):
@@ -918,16 +943,63 @@ class DeepTFA:
                                      plot_ellipse=plot_ellipse,
                                      legend_ordering=legend_ordering)
 
-    def scatter_task_embedding(self, labeler=None, filename='', show=True,
-                               xlims=None, ylims=None, figsize=utils.FIGSIZE,
-                               colormap=plt.rcParams['image.cmap'],
-                               serialize_data=True, plot_ellipse=True,
-                               legend_ordering=None):
+    def scatter_subject_weight_embedding(self, labeler=None, filename='', show=True,
+                                  xlims=None, ylims=None, figsize=utils.FIGSIZE,
+                                  colormap='Accent', serialize_data=True,
+                                  plot_ellipse=True, legend_ordering=None):
         if filename == '':
-            filename = self.common_name() + '_task_embedding.pdf'
+            filename = self.common_name() + '_subject_weight_embedding.pdf'
         hyperparams = self.variational.hyperparams.state_vardict()
-        z_s_mu = hyperparams['task']['mu'].data
-        z_s_sigma = softplus(hyperparams['task']['sigma'].data)
+        z_p_mu = hyperparams['participant_weight']['mu'].data
+        z_p_sigma = softplus(hyperparams['participant_weight']['sigma'].data)
+        subjects = self.subjects()
+
+        minus_lims = torch.min(z_p_mu - z_p_sigma * 2, dim=0)[0].tolist()
+        plus_lims = torch.max(z_p_mu + z_p_sigma * 2, dim=0)[0].tolist()
+        if not xlims:
+            xlims = (minus_lims[0], plus_lims[0])
+        if not ylims:
+            ylims = (minus_lims[1], plus_lims[1])
+
+        if labeler is None:
+            labeler = lambda s: s
+        labels = sorted(list({labeler(s) for s in subjects}))
+        if all([isinstance(label, float) for label in labels]):
+            palette = cm.ScalarMappable(None, colormap)
+            subject_colors = palette.to_rgba(np.array(labels), norm=True)
+            palette.set_array(np.array(labels))
+        else:
+            palette = dict(zip(
+                labels, utils.compose_palette(len(labels), colormap=colormap)
+            ))
+            subject_colors = [palette[labeler(subject)] for subject in subjects]
+
+        if serialize_data:
+            tensors_filename = os.path.splitext(filename)[0] + '.dat'
+            tensors = {
+                'z_p': {'mu': z_p_mu, 'sigma': z_p_sigma},
+                'palette': palette,
+                'subject_colors': subject_colors,
+                'labels': labels,
+            }
+            torch.save(tensors, tensors_filename)
+
+        utils.embedding_clusters_fig(z_p_mu, z_p_sigma, subject_colors, 'z^{PW}',
+                                     'Participant Embeddings', palette,
+                                     filename=filename, show=show, xlims=xlims,
+                                     ylims=ylims, figsize=figsize,
+                                     plot_ellipse=plot_ellipse,
+                                     legend_ordering=legend_ordering)
+
+    def scatter_task_weight_embedding(self, labeler=None, filename='', show=True,
+                               xlims=None, ylims=None, figsize=utils.FIGSIZE,
+                               colormap='Accent', serialize_data=True,
+                               plot_ellipse=True, legend_ordering=None):
+        if filename == '':
+            filename = self.common_name() + '_task_weight_embedding.pdf'
+        hyperparams = self.variational.hyperparams.state_vardict()
+        z_s_mu = hyperparams['task_weight']['mu'].data
+        z_s_sigma = softplus(hyperparams['task_weight']['sigma'].data)
         tasks = self.tasks()
 
         minus_lims = torch.min(z_s_mu - z_s_sigma * 2, dim=0)[0].tolist()
@@ -960,12 +1032,64 @@ class DeepTFA:
             }
             torch.save(tensors, tensors_filename)
 
-        utils.embedding_clusters_fig(z_s_mu, z_s_sigma, task_colors, 'z^S',
+        utils.embedding_clusters_fig(z_s_mu, z_s_sigma, task_colors, 'z^{SW}',
                                      'Stimulus Embeddings', palette,
                                      filename=filename, show=show, xlims=xlims,
                                      ylims=ylims, figsize=figsize,
                                      plot_ellipse=plot_ellipse,
                                      legend_ordering=legend_ordering)
+
+    def scatter_interactions_embedding(self, labeler=None, filename='', show=True,
+                               xlims=None, ylims=None, figsize=utils.FIGSIZE,
+                               colormap='Accent', serialize_data=True,
+                               plot_ellipse=True, legend_ordering=None):
+        import itertools
+        if filename == '':
+            filename = self.common_name() + '_interactions_embedding.pdf'
+        hyperparams = self.variational.hyperparams.state_vardict()
+        z_ps_mu = hyperparams['interactions']['mu'].data
+        z_ps_sigma = softplus(hyperparams['interactions']['sigma'].data)
+        tasks = self.stimuli()
+        subjects = self.subjects()
+        interactions = OrderedSet(list(itertools.product(subjects,tasks)))
+
+        minus_lims = torch.min(z_ps_mu - z_ps_sigma * 2, dim=0)[0].tolist()
+        plus_lims = torch.max(z_ps_mu + z_ps_sigma * 2, dim=0)[0].tolist()
+        if not xlims:
+            xlims = (minus_lims[0], plus_lims[0])
+        if not ylims:
+            ylims = (minus_lims[1], plus_lims[1])
+
+        if labeler is None:
+            labeler = lambda s,t: (s,t)
+        labels = sorted(list({labeler(s,t) for s,t in interactions}))
+        # labels = sorted(list({labeler(t,s) for t,s in list(itertools.product(tasks,subjects))}))
+        if all([isinstance(label, float) for label in labels]):
+            palette = cm.ScalarMappable(None, colormap)
+            interaction_colors = palette.to_rgba(np.array(labels), norm=True)
+            palette.set_array(np.array(labels))
+        else:
+            palette = dict(zip(
+                labels, utils.compose_palette(len(labels), colormap=colormap)
+            ))
+            interaction_colors = [palette[labeler(subject,task)] for subject,task in interactions]
+
+        if serialize_data:
+            tensors_filename = os.path.splitext(filename)[0] + '.dat'
+            tensors = {
+                'z_ps': {'mu': z_ps_mu, 'sigma': z_ps_sigma},
+                'palette': palette,
+                'task_colors': interaction_colors,
+                'labels': labels,
+            }
+            torch.save(tensors, tensors_filename)
+
+        utils.embedding_clusters_fig(z_ps_mu, z_ps_sigma, interaction_colors,
+                                      'z^{PS}', 'Interactions Embeddings', palette,
+                                      filename=filename, show=show, xlims=xlims,
+                                      ylims=ylims, figsize=figsize,
+                                      plot_ellipse=plot_ellipse,
+                                      legend_ordering=legend_ordering)
 
     def common_name(self):
         if self._common_name:

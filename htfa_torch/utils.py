@@ -271,14 +271,14 @@ def kmeans_factor_widths(locations, num_factors, kmeans):
 
 def init_width(activations,locations,weight,c):
     from scipy import optimize
-    start_width = 1000
+    start_log_width = np.log(1000)
     c = np.expand_dims(c,0)
-    objective = lambda w: np.sum((activations - initial_radial_basis(locations,c,w))**2)
-    result = optimize.minimize(objective,x0=start_width)
+    objective = lambda w: np.sum((activations - initial_radial_basis(locations,c,np.exp(w)))**2)
+    result = optimize.minimize(objective,x0=start_log_width)
 
-    return result.x
+    return np.exp(result.x)
 
-def initial_hypermeans(activations, locations, num_factors, hotspot=False):
+def initial_hypermeans(activations, locations, num_factors, hotspot=True):
     """Initialize our center, width, and weight parameters via K-means"""
     if hotspot:
         activation_image = activations.mean(axis=1)
@@ -290,9 +290,9 @@ def initial_hypermeans(activations, locations, num_factors, hotspot=False):
             ind = np.argmax(activations_mean)
             centers[k, :] = locations[ind, :]
             widths[k] = init_width(activations_mean, locations, activations_mean[ind], centers[k, :])
-            activations_mean = activations_mean - activations_mean[ind]*\
-                               initial_radial_basis(locations, np.expand_dims(centers[k, :],axis=0),
-                                                    np.array([widths[k]]))
+            activations_mean = activations_mean - activations_mean[ind]\
+                               *initial_radial_basis(locations,np.expand_dims(centers[k, :],axis=0),
+                                                     np.array([widths[k]]))
             activations_mean = activations_mean.squeeze()
         initial_centers = centers
         initial_widths = widths
