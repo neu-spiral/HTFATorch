@@ -34,7 +34,7 @@ import torch.nn as nn
 from torch.nn import Parameter
 from torch.nn.functional import softplus
 import torch.optim.lr_scheduler
-
+import itertools
 import probtorch
 
 from . import dtfa_models
@@ -77,9 +77,13 @@ class DeepTFA:
 
         subjects = self.subjects()
         tasks = self.tasks()
+        stimuli = self.stimuli()
+        interactions = OrderedSet(list(itertools.product(subjects,stimuli)))
         block_subjects = [subjects.index(b.subject) for b in self._blocks]
         block_tasks = [tasks.index(b.task) for b in self._blocks]
-
+        block_stimuli = [stimuli.index(b.individual_differences['stimulus']) for b in self._blocks]
+        block_interactions = [interactions.index((b.subject,b.individual_differences['stimulus']))
+                              for b in self._blocks]
         b = max(range(self.num_blocks), key=lambda b: self.num_times[b])
         init_activations = self.voxel_activations.copy()
         max_times = max(self.num_times)
@@ -102,11 +106,12 @@ class DeepTFA:
                                                   embedding_dim,
                                                   time_series=model_time_series)
         self.generative = dtfa_models.DeepTFAModel(
-            self.voxel_locations, block_subjects, block_tasks,
+            self.voxel_locations, block_subjects, block_tasks, block_stimuli, block_interactions,
             self.num_factors, self.num_blocks, self.num_times, embedding_dim
         )
         self.variational = dtfa_models.DeepTFAGuide(self.num_factors,
                                                     block_subjects, block_tasks,
+                                                    block_stimuli, block_interactions,
                                                     self.num_blocks,
                                                     self.num_times,
                                                     embedding_dim, hyper_means,
@@ -117,6 +122,9 @@ class DeepTFA:
 
     def tasks(self):
         return OrderedSet([b.task for b in self._blocks])
+
+    def stimuli(self):
+        return OrderedSet([b.individual_differences['stimulus'] for b in self._blocks])
 
     def num_parameters(self):
         parameters = list(self.variational.parameters()) +\
@@ -357,7 +365,7 @@ class DeepTFA:
                  prior_kl.mean(dim=0).item()],
                 [iwae_free_energy, iwae_log_likelihood, iwae_prior_kl]]
 
-    def results(self, block=None, subject=None, task=None, hist_weights=False):
+    def results(self, block=None, subject=None, task=None, interaction=None, hist_weights=False):
         hyperparams = self.variational.hyperparams.state_vardict()
         for k, v in hyperparams.items():
             hyperparams[k] = v.expand(1, *v.shape)
@@ -370,11 +378,13 @@ class DeepTFA:
             blocks = [block]
             block_subjects = [self.generative.block_subjects[block]]
             block_tasks = [self.generative.block_tasks[block]]
+            block_interactions = [self.generative.block_interactions[block]]
         else:
             times = (0, max(self.num_times))
             blocks = []
             block_subjects = self.generative.block_subjects
             block_tasks = self.generative.block_tasks
+            block_interactions = self.generative.block_interactions
 
         for b in blocks:
             if subject is not None:
@@ -401,13 +411,13 @@ class DeepTFA:
                     value=factor_log_widths_params['mu'][:, subject],
                     name='FactorLogWidths%d' % b,
                 )
-            if task is not None:
+            if interaction is not None:
                 guide.variable(
                     torch.distributions.Normal,
-                    hyperparams['task']['mu'][:, task],
-                    softplus(hyperparams['task']['sigma'][:, task]),
-                    value=hyperparams['task']['mu'][:, task],
-                    name='z^S_{%d,%d}' % (task, b),
+                    hyperparams['interactions']['mu'][:, task],
+                    softplus(hyperparams['interactions']['sigma'][:, task]),
+                    value=hyperparams['interactions']['mu'][:, task],
+                    name='z^I_{%d,%d}' % (interaction , b),
                 )
             if self._time_series:
                 for k, v in hyperparams['weights'].items():
@@ -422,7 +432,7 @@ class DeepTFA:
                 )
 
         weights, factor_centers, factor_log_widths =\
-            self.decoder(probtorch.Trace(), blocks, block_subjects, block_tasks,
+            self.decoder(probtorch.Trace(), blocks, block_subjects, block_tasks, block_interactions,
                          hyperparams, times, guide=guide, num_particles=1)
 
         if block is not None:
@@ -447,8 +457,8 @@ class DeepTFA:
         }
         if subject is not None:
             result['z^P_%d' % subject] = hyperparams['subject']['mu'][:, subject]
-        if task is not None:
-            result['z^S_%d' % task] = hyperparams['task']['mu'][:, task]
+        if interaction is not None:
+            result['z^I_{%d}' % interaction] = hyperparams['interactions']['mu'][:, interaction]
         return result
 
     def reconstruction(self, block=None, subject=None, task=None, t=0):
