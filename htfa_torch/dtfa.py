@@ -77,6 +77,7 @@ class DeepTFA:
 
         subjects = self.subjects()
         tasks = self.tasks()
+        self.num_tasks = len(tasks)
         stimuli = self.stimuli()
         interactions = OrderedSet(list(itertools.product(subjects,stimuli)))
         block_subjects = [subjects.index(b.subject) for b in self._blocks]
@@ -103,6 +104,7 @@ class DeepTFA:
         }
 
         self.decoder = dtfa_models.DeepTFADecoder(self.num_factors, hyper_means,
+                                                  self.num_tasks,
                                                   embedding_dim,
                                                   time_series=model_time_series)
         self.generative = dtfa_models.DeepTFAModel(
@@ -922,6 +924,54 @@ class DeepTFA:
             torch.save(tensors, tensors_filename)
 
         utils.embedding_clusters_fig(z_p_mu, z_p_sigma, subject_colors, 'z^P',
+                                     'Participant Embeddings', palette,
+                                     filename=filename, show=show, xlims=xlims,
+                                     ylims=ylims, figsize=figsize,
+                                     plot_ellipse=plot_ellipse,
+                                     legend_ordering=legend_ordering)
+    def scatter_subject_weight_embedding(self, labeler=None, filename='', show=True,
+                                  xlims=None, ylims=None, figsize=utils.FIGSIZE,
+                                  colormap=plt.rcParams['image.cmap'],
+                                  serialize_data=True, plot_ellipse=True,
+                                  legend_ordering=None):
+        if filename == '':
+            filename = self.common_name() + '_subject_weight_embedding.pdf'
+        hyperparams = self.variational.hyperparams.state_vardict()
+        z_p_mu = hyperparams['subject_weight']['mu'].data
+        z_p_sigma = softplus(hyperparams['subject_weight']['sigma'].data)
+        subjects = self.subjects()
+
+        minus_lims = torch.min(z_p_mu - z_p_sigma * 2, dim=0)[0].tolist()
+        plus_lims = torch.max(z_p_mu + z_p_sigma * 2, dim=0)[0].tolist()
+        if not xlims:
+            xlims = (minus_lims[0], plus_lims[0])
+        if not ylims:
+            ylims = (minus_lims[1], plus_lims[1])
+
+        if labeler is None:
+            labeler = lambda s: s
+        labels = sorted(list({labeler(s) for s in subjects}))
+        if all([isinstance(label, float) for label in labels]):
+            palette = cm.ScalarMappable(None, colormap)
+            subject_colors = palette.to_rgba(np.array(labels), norm=True)
+            palette.set_array(np.array(labels))
+        else:
+            palette = dict(zip(
+                labels, utils.compose_palette(len(labels), colormap=colormap)
+            ))
+            subject_colors = [palette[labeler(subject)] for subject in subjects]
+
+        if serialize_data:
+            tensors_filename = os.path.splitext(filename)[0] + '.dat'
+            tensors = {
+                'z_pw': {'mu': z_p_mu, 'sigma': z_p_sigma},
+                'palette': palette,
+                'subject_colors': subject_colors,
+                'labels': labels,
+            }
+            torch.save(tensors, tensors_filename)
+
+        utils.embedding_clusters_fig(z_p_mu, z_p_sigma, subject_colors, 'z^PW',
                                      'Participant Embeddings', palette,
                                      filename=filename, show=show, xlims=xlims,
                                      ylims=ylims, figsize=figsize,

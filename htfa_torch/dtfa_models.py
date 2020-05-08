@@ -35,9 +35,9 @@ class DeepTFAGenerativeHyperparams(tfa_models.HyperParams):
                 'mu': torch.zeros(self.num_subjects, self.embedding_dim),
                 'sigma': torch.ones(self.num_subjects, self.embedding_dim),
             },
-            'interactions': {
-                'mu': torch.zeros(self.num_stimuli*self.num_subjects, self.embedding_dim),
-                'sigma': torch.ones(self.num_stimuli*self.num_subjects, self.embedding_dim)
+            'subject_weight': {
+                'mu': torch.zeros(self.num_subjects, self.embedding_dim),
+                'sigma': torch.ones(self.num_subjects, self.embedding_dim),
             },
             'voxel_noise': torch.ones(1) * tfa_models.VOXEL_NOISE,
         })
@@ -60,9 +60,13 @@ class DeepTFAGuideHyperparams(tfa_models.HyperParams):
                 'mu': torch.zeros(self.num_subjects, self.embedding_dim),
                 'sigma': torch.ones(self.num_subjects, self.embedding_dim),
             },
+            'subject_weight': {
+                'mu': torch.zeros(self.num_subjects, self.embedding_dim),
+                'sigma': torch.ones(self.num_subjects, self.embedding_dim),
+            },
             'interactions': {
-                'mu': torch.zeros(self.num_stimuli*self.num_subjects, self.embedding_dim),
-                'sigma': torch.ones(self.num_stimuli*self.num_subjects, self.embedding_dim),
+                'mu': torch.zeros(self.num_tasks*self.num_subjects, self.embedding_dim),
+                'sigma': torch.ones(self.num_tasks*self.num_subjects, self.embedding_dim),
             },
             'factor_centers': {
                 'mu': hyper_means['factor_centers'].expand(self.num_subjects,
@@ -91,13 +95,13 @@ class DeepTFAGuideHyperparams(tfa_models.HyperParams):
 class DeepTFADecoder(nn.Module):
     """Neural network module mapping from embeddings to a topographic factor
        analysis"""
-    def __init__(self, num_factors, hyper_means, embedding_dim=2,
+    def __init__(self, num_factors, hyper_means, num_tasks, embedding_dim=2,
                  time_series=True):
         super(DeepTFADecoder, self).__init__()
         self._embedding_dim = embedding_dim
         self._num_factors = num_factors
         self._time_series = time_series
-
+        self._num_tasks = num_tasks
         self.factors_embedding = nn.Sequential(
             nn.Linear(self._embedding_dim, self._embedding_dim * 2),
             nn.PReLU(),
@@ -123,6 +127,15 @@ class DeepTFADecoder(nn.Module):
                 self._num_factors * 4 * 2
             )
         )
+
+        self.interaction_embedding = nn.Sequential(
+            nn.Linear(self._embedding_dim , self._embedding_dim * 4),
+            nn.PReLU(),
+            nn.Linear(self._embedding_dim * 4, self._embedding_dim * 8),
+            nn.PReLU(),
+            nn.Linear(self._embedding_dim * 8, self._num_tasks * self._embedding_dim * 2),
+        )
+
         self.weights_embedding = nn.Sequential(
             nn.Linear(self._embedding_dim , self._embedding_dim * 4),
             nn.PReLU(),
@@ -164,17 +177,28 @@ class DeepTFADecoder(nn.Module):
         if subject is not None:
             subject_embed = self._predict_param(
                 params, 'subject', subject, None,
-                'z^P_{%d,%d}' % (subject, block), trace, False, guide
+                'z^PF_{%d,%d}' % (subject, block), trace, False, guide
             )
         else:
             subject_embed = origin
-        if interaction is not None:
-            interaction_embed = self._predict_param(
-                params, 'interactions', interaction, None, 'z^I_{%d,%d}' % (interaction, block),
-                trace, False, guide
+        if subject is not None:
+            subject_weight_embed = self._predict_param(
+                params, 'subject_weight', subject, None,
+                'z^PW_{%d,%d}' % (subject, block), trace, False, guide
             )
         else:
-            interaction_embed = origin
+            subject_weight_embed = origin
+
+        interaction_params = self.interaction_embedding(subject_weight_embed)
+        interaction_params = interaction_params.view(-1, self._num_tasks, 2, 2)
+        if generative:
+            interaction_embed = self._predict_param(params, 'interactions', interaction, interaction_params[:,task,:,:],
+                                                    'z^I_{%d,%d}' % (interaction, block),
+                                                    trace, predict=generative, guide=guide)
+        else:
+            interaction_embed = self._predict_param(params, 'interactions', interaction, interaction_params,
+                                                    'z^I_{%d,%d}' % (interaction, block),
+                                                    trace, predict=generative, guide=guide)
         factor_params = self.factors_embedding(subject_embed).view(
             -1, self._num_factors, 4, 2
         )
@@ -241,7 +265,7 @@ class DeepTFADecoder(nn.Module):
 
 class DeepTFAGuide(nn.Module):
     """Variational guide for deep topographic factor analysis"""
-    def __init__(self, num_factors, block_subjects, block_tasks, block_stimuli, block_interactions, num_blocks=1,
+    def __init__(self, num_factors, block_subjects, block_tasks, block_stimuli, block_interactions,num_blocks=1,
                  num_times=[1], embedding_dim=2, hyper_means=None,
                  time_series=True):
         super(self.__class__, self).__init__()
@@ -250,7 +274,6 @@ class DeepTFAGuide(nn.Module):
         self._num_factors = num_factors
         self._embedding_dim = embedding_dim
         self._time_series = time_series
-
         self.block_subjects = block_subjects
         self.block_tasks = block_tasks
         self.block_interactions = block_interactions
