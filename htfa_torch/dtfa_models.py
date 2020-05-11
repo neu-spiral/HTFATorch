@@ -192,7 +192,7 @@ class DeepTFADecoder(nn.Module):
             -1, self._num_factors, 6, 2
         )
         centers_predictions = factor_params[:, :, :3]
-        log_widths_predictions = factor_params[:, :, 3:]
+        log_widths_predictions = softplus(factor_params[:, :, 3:])
 
         joint_embed = torch.cat((subject_embed, task_embed), dim=-1)
         weight_predictions = (self.weights_embedding(joint_embed) + self.weights_skip(joint_embed)).view(
