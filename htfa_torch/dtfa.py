@@ -95,7 +95,7 @@ class DeepTFA:
         hyper_means = {
             'weights': torch.Tensor(weights),
             'factor_centers': torch.Tensor(centers),
-            'factor_log_widths': widths,
+            'factor_log_widths': widths.unsqueeze(-1).expand(num_factors, 3),
         }
 
         self.decoder = dtfa_models.DeepTFADecoder(self.num_factors,
@@ -561,7 +561,7 @@ class DeepTFA:
         results = self.results(block)
 
         centers_sizes = np.repeat([50], self.num_factors)
-        sizes = torch.exp(results['factor_log_widths']).numpy()
+        sizes = torch.exp(results['factor_log_widths'].mean(dim=1)).numpy()
 
         centers = results['factor_centers'].numpy()
 
@@ -794,7 +794,7 @@ class DeepTFA:
         plot = niplot.plot_connectome(
             np.eye(self.num_factors),
             centers.view(self.num_factors, 3).numpy(),
-            node_size=widths.view(self.num_factors).numpy(),
+            node_size=widths.mean(dim=-1).view(self.num_factors).numpy(),
             title="$x^F$ std-dev %.8e, $\\rho^F$ std-dev %.8e" %
             (centers.std(0).norm(), log_widths.std(0).norm()),
             **kwargs
