@@ -35,12 +35,12 @@ def radial_basis(locations, centers, log_widths):
         # 1 x V x 3 -> 1 x 1 x V x 3
         locations = locations.unsqueeze(0)
     # S x K x 3 -> S x K x 1 x 3
-    centers = centers.unsqueeze(len(centers.shape) - 1)
-    # S x K x V x 3
-    delta2s = ((locations - centers)**2).sum(len(centers.shape) - 1)
-    # S x K  -> S x K x 1
-    log_widths = log_widths.unsqueeze(len(log_widths.shape))
-    return torch.exp(-torch.exp(torch.log(delta2s) - log_widths))
+    centers = centers.unsqueeze(-2)
+    # S x K x 3  -> S x K x 1 x 3
+    log_widths = log_widths.unsqueeze(-2)
+    log_delta2s = torch.log((locations - centers)**2) - log_widths
+    # S x K x V x 3 -> S x K x V
+    return torch.exp(-torch.exp(log_delta2s).sum(dim=-1))
 
 class Model(nn.Module):
     def __init__(self):
