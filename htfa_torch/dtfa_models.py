@@ -111,25 +111,25 @@ class DeepTFADecoder(nn.Module):
             nn.PReLU(),
             nn.Linear(self._embedding_dim * 2, self._embedding_dim * 4),
             nn.PReLU(),
-            nn.Linear(self._embedding_dim * 4, self._num_factors * 4 * 2),
+            nn.Linear(self._embedding_dim * 4, self._num_factors * 6 * 2),
         )
         factor_loc = torch.cat(
             (center.expand(self._num_factors, 3),
-             torch.ones(self._num_factors, 1) * np.log(coefficient)),
+             torch.ones(self._num_factors, 3) * np.log(coefficient)),
             dim=-1
         )
         factor_log_scale = torch.cat(
             (torch.log(center_sigma / coefficient).expand(
                 self._num_factors, 3
-            ), torch.zeros(self._num_factors, 1)),
+            ), torch.zeros(self._num_factors, 3)),
             dim=-1
         )
         self.factors_embedding[-1].bias = nn.Parameter(
             torch.stack((factor_loc, factor_log_scale), dim=-1).reshape(
-                self._num_factors * 4 * 2
+                self._num_factors * 6 * 2
             )
         )
-        self.factors_skip = nn.Linear(self._embedding_dim, self._num_factors * 4 * 2)
+        self.factors_skip = nn.Linear(self._embedding_dim, self._num_factors * 6 * 2)
         if locations is not None:
             self.register_buffer('locations_min',
                                  torch.min(locations, dim=0)[0])
@@ -189,10 +189,10 @@ class DeepTFADecoder(nn.Module):
         else:
             task_embed = origin
         factor_params = (self.factors_embedding(subject_embed) + self.factors_skip(subject_embed)).view(
-            -1, self._num_factors, 4, 2
+            -1, self._num_factors, 6, 2
         )
         centers_predictions = factor_params[:, :, :3]
-        log_widths_predictions = factor_params[:, :, 3]
+        log_widths_predictions = factor_params[:, :, 3:]
 
         joint_embed = torch.cat((subject_embed, task_embed), dim=-1)
         weight_predictions = (self.weights_embedding(joint_embed) + self.weights_skip(joint_embed)).view(
