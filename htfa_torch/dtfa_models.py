@@ -72,9 +72,10 @@ class DeepTFAGuideHyperparams(tfa_models.HyperParams):
             },
             'factor_log_widths': {
                 'mu': hyper_means['factor_log_widths'].expand(
-                    self.num_subjects, self._num_factors
+                    self.num_subjects, self._num_factors, 3
                 ),
-                'log_sigma': torch.zeros(self.num_subjects, self._num_factors) +\
+                'log_sigma': torch.zeros(self.num_subjects, self._num_factors,
+                                         3) +\
                              hyper_means['factor_log_widths'].std().log(),
             },
         })
