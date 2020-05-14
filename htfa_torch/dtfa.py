@@ -83,7 +83,7 @@ class DeepTFA:
         block_subjects = [subjects.index(b.subject) for b in self._blocks]
         block_tasks = [tasks.index(b.task) for b in self._blocks]
         # block_stimuli = [stimuli.index(b.individual_differences['stimulus']) for b in self._blocks]
-        block_interactions = [interactions.index((b.subject,b.individual_differences['stimulus']))
+        block_interactions = [interactions.index((b.subject,b.task))
                               for b in self._blocks]
         b = max(range(self.num_blocks), key=lambda b: self.num_times[b])
         init_activations = self.voxel_activations.copy()
