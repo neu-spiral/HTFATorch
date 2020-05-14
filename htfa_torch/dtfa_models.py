@@ -24,11 +24,11 @@ from . import tfa_models
 from . import utils
 
 class DeepTFAGenerativeHyperparams(tfa_models.HyperParams):
-    def __init__(self, num_subjects, num_tasks, num_stimuli, embedding_dim=2):
+    def __init__(self, num_subjects, num_tasks, embedding_dim=2):
         self.num_subjects = num_subjects
         self.num_tasks = num_tasks
         self.embedding_dim = embedding_dim
-        self.num_stimuli = num_stimuli
+        # self.num_stimuli = num_stimuli
 
         params = utils.vardict({
             'subject': {
@@ -51,14 +51,13 @@ class DeepTFAGenerativeHyperparams(tfa_models.HyperParams):
 
 class DeepTFAGuideHyperparams(tfa_models.HyperParams):
     def __init__(self, num_blocks, num_times, num_factors, num_subjects,
-                 num_tasks, num_stimuli, hyper_means, embedding_dim=2, time_series=True):
+                 num_tasks, hyper_means, embedding_dim=2, time_series=True):
         self.num_blocks = num_blocks
         self.num_subjects = num_subjects
         self.num_tasks = num_tasks
         self.num_times = max(num_times)
         self._num_factors = num_factors
         self.embedding_dim = embedding_dim
-        self.num_stimuli = num_stimuli
 
         params = utils.vardict({
             'subject': {
@@ -282,7 +281,7 @@ class DeepTFADecoder(nn.Module):
 
 class DeepTFAGuide(nn.Module):
     """Variational guide for deep topographic factor analysis"""
-    def __init__(self, num_factors, block_subjects, block_tasks, block_stimuli, block_interactions,num_blocks=1,
+    def __init__(self, num_factors, block_subjects, block_tasks, block_interactions,num_blocks=1,
                  num_times=[1], embedding_dim=2, hyper_means=None,
                  time_series=True):
         super(self.__class__, self).__init__()
@@ -294,15 +293,13 @@ class DeepTFAGuide(nn.Module):
         self.block_subjects = block_subjects
         self.block_tasks = block_tasks
         self.block_interactions = block_interactions
-        self.block_stimuli = block_stimuli
         num_subjects = len(set(self.block_subjects))
         num_tasks = len(set(self.block_tasks))
-        num_stimuli = len(set(self.block_stimuli))
 
         self.hyperparams = DeepTFAGuideHyperparams(self._num_blocks,
                                                    self._num_times,
                                                    self._num_factors,
-                                                   num_subjects, num_tasks, num_stimuli,
+                                                   num_subjects, num_tasks,
                                                    hyper_means,
                                                    embedding_dim, time_series)
 
@@ -330,7 +327,7 @@ class DeepTFAGuide(nn.Module):
 
 class DeepTFAModel(nn.Module):
     """Generative model for deep topographic factor analysis"""
-    def __init__(self, locations, block_subjects, block_tasks, block_stimuli, block_interactions,
+    def __init__(self, locations, block_subjects, block_tasks, block_interactions,
                  num_factors=tfa_models.NUM_FACTORS, num_blocks=1,
                  num_times=[1], embedding_dim=2):
         super(self.__class__, self).__init__()
@@ -341,10 +338,9 @@ class DeepTFAModel(nn.Module):
         self.block_subjects = block_subjects
         self.block_tasks = block_tasks
         self.block_interactions = block_interactions
-        self.block_stimuli =block_stimuli
 
         self.hyperparams = DeepTFAGenerativeHyperparams(
-            len(set(block_subjects)), len(set(block_tasks)), len(set(block_stimuli)), embedding_dim
+            len(set(block_subjects)), len(set(block_tasks)), embedding_dim
         )
         self.add_module('likelihood', tfa_models.TFAGenerativeLikelihood(
             locations, self._num_times, block=None, register_locations=False

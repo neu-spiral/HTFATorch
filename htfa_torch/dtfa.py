@@ -78,11 +78,11 @@ class DeepTFA:
         subjects = self.subjects()
         tasks = self.tasks()
         self.num_tasks = len(tasks)
-        stimuli = self.stimuli()
+        # stimuli = self.stimuli()
         interactions = OrderedSet(list(itertools.product(subjects,stimuli)))
         block_subjects = [subjects.index(b.subject) for b in self._blocks]
         block_tasks = [tasks.index(b.task) for b in self._blocks]
-        block_stimuli = [stimuli.index(b.individual_differences['stimulus']) for b in self._blocks]
+        # block_stimuli = [stimuli.index(b.individual_differences['stimulus']) for b in self._blocks]
         block_interactions = [interactions.index((b.subject,b.individual_differences['stimulus']))
                               for b in self._blocks]
         b = max(range(self.num_blocks), key=lambda b: self.num_times[b])
@@ -108,12 +108,12 @@ class DeepTFA:
                                                   embedding_dim,
                                                   time_series=model_time_series)
         self.generative = dtfa_models.DeepTFAModel(
-            self.voxel_locations, block_subjects, block_tasks, block_stimuli, block_interactions,
+            self.voxel_locations, block_subjects, block_tasks , block_interactions,
             self.num_factors, self.num_blocks, self.num_times, embedding_dim
         )
         self.variational = dtfa_models.DeepTFAGuide(self.num_factors,
                                                     block_subjects, block_tasks,
-                                                    block_stimuli, block_interactions,
+                                                    block_interactions,
                                                     self.num_blocks,
                                                     self.num_times,
                                                     embedding_dim, hyper_means,
@@ -124,10 +124,7 @@ class DeepTFA:
 
     def tasks(self):
         return OrderedSet([b.task for b in self._blocks])
-
-    def stimuli(self):
-        return OrderedSet([b.individual_differences['stimulus'] for b in self._blocks])
-
+    
     def num_parameters(self):
         parameters = list(self.variational.parameters()) +\
                      list(self.decoder.parameters())
