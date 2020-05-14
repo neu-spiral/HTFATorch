@@ -79,7 +79,7 @@ class DeepTFA:
         tasks = self.tasks()
         self.num_tasks = len(tasks)
         # stimuli = self.stimuli()
-        interactions = OrderedSet(list(itertools.product(subjects,stimuli)))
+        interactions = OrderedSet(list(itertools.product(subjects,tasks)))
         block_subjects = [subjects.index(b.subject) for b in self._blocks]
         block_tasks = [tasks.index(b.task) for b in self._blocks]
         # block_stimuli = [stimuli.index(b.individual_differences['stimulus']) for b in self._blocks]
@@ -124,7 +124,7 @@ class DeepTFA:
 
     def tasks(self):
         return OrderedSet([b.task for b in self._blocks])
-    
+
     def num_parameters(self):
         parameters = list(self.variational.parameters()) +\
                      list(self.decoder.parameters())
