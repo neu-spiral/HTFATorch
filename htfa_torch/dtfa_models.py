@@ -33,15 +33,15 @@ class DeepTFAGenerativeHyperparams(tfa_models.HyperParams):
         params = utils.vardict({
             'subject': {
                 'mu': torch.zeros(self.num_subjects, self.embedding_dim),
-                'sigma': torch.ones(self.num_subjects, self.embedding_dim),
+                'sigma': torch.ones(self.num_subjects, self.embedding_dim).log(),
             },
             'subject_weight': {
                 'mu': torch.zeros(self.num_subjects, self.embedding_dim),
-                'sigma': torch.ones(self.num_subjects, self.embedding_dim),
+                'sigma': torch.ones(self.num_subjects, self.embedding_dim).log(),
             },
             'task': {
                 'mu': torch.zeros(self.num_tasks, self.embedding_dim),
-                'sigma': torch.ones(self.num_tasks, self.embedding_dim),
+                'sigma': torch.ones(self.num_tasks, self.embedding_dim).log(),
             },
 
             'voxel_noise': torch.ones(1) * tfa_models.VOXEL_NOISE,
@@ -62,32 +62,32 @@ class DeepTFAGuideHyperparams(tfa_models.HyperParams):
         params = utils.vardict({
             'subject': {
                 'mu': torch.zeros(self.num_subjects, self.embedding_dim),
-                'sigma': torch.ones(self.num_subjects, self.embedding_dim),
+                'sigma': torch.ones(self.num_subjects, self.embedding_dim).log(),
             },
             'subject_weight': {
                 'mu': torch.zeros(self.num_subjects, self.embedding_dim),
-                'sigma': torch.ones(self.num_subjects, self.embedding_dim),
+                'sigma': torch.ones(self.num_subjects, self.embedding_dim).log(),
             },
             'task': {
                 'mu': torch.zeros(self.num_tasks, self.embedding_dim),
-                'sigma': torch.ones(self.num_tasks, self.embedding_dim),
+                'sigma': torch.ones(self.num_tasks, self.embedding_dim).log(),
             },
             'interactions': {
                 'mu': torch.zeros(self.num_tasks*self.num_subjects, self.embedding_dim),
-                'sigma': torch.ones(self.num_tasks*self.num_subjects, self.embedding_dim),
+                'sigma': torch.ones(self.num_tasks*self.num_subjects, self.embedding_dim).log(),
             },
             'factor_centers': {
                 'mu': hyper_means['factor_centers'].expand(self.num_subjects,
                                                            self._num_factors,
                                                            3),
-                'sigma': torch.ones(self.num_subjects, self._num_factors, 3),
+                'sigma': torch.ones(self.num_subjects, self._num_factors, 3).log(),
             },
             'factor_log_widths': {
                 'mu': hyper_means['factor_log_widths'].expand(
                     self.num_subjects, self._num_factors
                 ),
-                'sigma': torch.ones(self.num_subjects, self._num_factors) *\
-                         hyper_means['factor_log_widths'].std(),
+                'sigma': (torch.ones(self.num_subjects, self._num_factors) *\
+                         hyper_means['factor_log_widths'].std()).log(),
             },
         })
         if time_series:
@@ -95,7 +95,7 @@ class DeepTFAGuideHyperparams(tfa_models.HyperParams):
                 'mu': torch.zeros(self.num_blocks, self.num_times,
                                   self._num_factors),
                 'sigma': torch.ones(self.num_blocks, self.num_times,
-                                    self._num_factors),
+                                    self._num_factors).log(),
             }
 
         super(self.__class__, self).__init__(params, guide=True)
@@ -179,7 +179,9 @@ class DeepTFADecoder(nn.Module):
                 else:
                     mu = mu[:, index]
                     sigma = sigma[:, index]
-        result = trace.normal(mu, softplus(sigma),
+        # result = trace.normal(mu, softplus(sigma),
+        #                       value=utils.clamped(name, guide), name=name)
+        result = trace.normal(mu, sigma.exp(),
                               value=utils.clamped(name, guide), name=name)
         return result
 
