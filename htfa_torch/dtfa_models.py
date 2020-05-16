@@ -72,10 +72,6 @@ class DeepTFAGuideHyperparams(tfa_models.HyperParams):
                 'mu': torch.zeros(self.num_tasks, self.embedding_dim),
                 'sigma': torch.ones(self.num_tasks, self.embedding_dim).log(),
             },
-            'interactions': {
-                'mu': torch.zeros(self.num_tasks*self.num_subjects, self.embedding_dim),
-                'sigma': torch.ones(self.num_tasks*self.num_subjects, self.embedding_dim).log(),
-            },
             'factor_centers': {
                 'mu': hyper_means['factor_centers'].expand(self.num_subjects,
                                                            self._num_factors,
@@ -136,18 +132,10 @@ class DeepTFADecoder(nn.Module):
             )
         )
 
-        # self.interaction_embedding = nn.Sequential(
-        #     nn.Linear(self._embedding_dim , self._embedding_dim * 4),
-        #     nn.PReLU(),
-        #     nn.Linear(self._embedding_dim * 4, self._embedding_dim * 8),
-        #     nn.PReLU(),
-        #     nn.Linear(self._embedding_dim * 8, self._num_tasks * self._embedding_dim * 2),
-        # )
-
         self.interaction_embedding = nn.Sequential(
             nn.Linear(self._embedding_dim * 2 , self._embedding_dim * 4),
             nn.PReLU(),
-            nn.Linear(self._embedding_dim * 4, self._embedding_dim * 2),
+            nn.Linear(self._embedding_dim * 4, self._embedding_dim),
         )
 
         self.weights_embedding = nn.Sequential(
@@ -179,8 +167,6 @@ class DeepTFADecoder(nn.Module):
                 else:
                     mu = mu[:, index]
                     sigma = sigma[:, index]
-        # result = trace.normal(mu, softplus(sigma),
-        #                       value=utils.clamped(name, guide), name=name)
         result = trace.normal(mu, sigma.exp(),
                               value=utils.clamped(name, guide), name=name)
         return result
@@ -211,12 +197,8 @@ class DeepTFADecoder(nn.Module):
             )
         else:
             task_embed = origin
-        joint_embed = torch.cat((subject_embed, task_embed), dim=-1)
-        interaction_params = self.interaction_embedding(joint_embed)
-        interaction_params = interaction_params.view(-1, self._embedding_dim, 2)
-        interaction_embed = self._predict_param(params, 'interactions', interaction, interaction_params,
-                                                'z^I_{%d,%d}' % (interaction, block),
-                                                trace, predict=generative, guide=guide)
+        joint_embed = torch.cat((subject_weight_embed, task_embed), dim=-1)
+        interaction_embed = self.interaction_embedding(joint_embed)
         factor_params = self.factors_embedding(subject_embed).view(
             -1, self._num_factors, 4, 2
         )
