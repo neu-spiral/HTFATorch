@@ -211,7 +211,7 @@ class DeepTFADecoder(nn.Module):
             )
         else:
             task_embed = origin
-        joint_embed = torch.cat((subject_embed, task_embed), dim=-1)
+        joint_embed = torch.cat((subject_weight_embed, task_embed), dim=-1)
         interaction_params = self.interaction_embedding(joint_embed)
         interaction_params = interaction_params.view(-1, self._embedding_dim, 2)
         interaction_embed = self._predict_param(params, 'interactions', interaction, interaction_params,
