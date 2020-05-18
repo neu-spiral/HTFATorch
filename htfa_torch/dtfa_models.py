@@ -135,7 +135,12 @@ class DeepTFADecoder(nn.Module):
         self.interaction_embedding = nn.Sequential(
             nn.Linear(self._embedding_dim * 2 , self._embedding_dim * 4),
             nn.PReLU(),
-            nn.Linear(self._embedding_dim * 4, self._embedding_dim),
+            nn.Linear(self._embedding_dim * 4, self._embedding_dim * 4),
+            nn.PReLU(),
+        )
+
+        self.interaction_embedding_out = (
+            nn.Linear(self._embedding_dim * 4 + self._embedding_dim * 2, self._embedding_dim)
         )
 
         self.weights_embedding = nn.Sequential(
@@ -199,6 +204,7 @@ class DeepTFADecoder(nn.Module):
             task_embed = origin
         joint_embed = torch.cat((subject_weight_embed, task_embed), dim=-1)
         interaction_embed = self.interaction_embedding(joint_embed)
+        interaction_embed = self.interaction_embedding_out(torch.cat((interaction_embed,joint_embed),dim=-1))
         factor_params = self.factors_embedding(subject_embed).view(
             -1, self._num_factors, 4, 2
         )
