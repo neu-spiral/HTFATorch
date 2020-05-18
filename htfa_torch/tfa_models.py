@@ -241,7 +241,7 @@ class TFAGenerativeLikelihood(GenerativeLikelihood):
         factors = radial_basis(voxel_locations, centers, log_widths)
         block = block if block is not None else self.block
         activations = trace.normal(weights @ factors,
-                                   softplus(params['voxel_noise'])[0],
+                                   params['voxel_noise'][0],
                                    value=observations['Y'],
                                    name='Y%dt%d-%d' % (block, times[0],
                                                        times[1]))
