@@ -134,14 +134,25 @@ class DeepTFADecoder(nn.Module):
                                  torch.min(locations, dim=0)[0])
             self.register_buffer('locations_max',
                                  torch.max(locations, dim=0)[0])
+
+        self.interaction_embedding = nn.Sequential(
+            nn.Linear(self._embedding_dim * 2 , self._embedding_dim * 4),
+            nn.PReLU(),
+            nn.Linear(self._embedding_dim * 4, self._embedding_dim * 8),
+            nn.PReLU(),
+            nn.Linear(self._embedding_dim * 8, self._embedding_dim)
+        )
+
+        self.interaction_skip = nn.Linear(self._embedding_dim * 2 , self._embedding_dim)
+
         self.weights_embedding = nn.Sequential(
-            nn.Linear(self._embedding_dim * 2, self._embedding_dim * 4),
+            nn.Linear(self._embedding_dim , self._embedding_dim * 4),
             nn.PReLU(),
             nn.Linear(self._embedding_dim * 4, self._embedding_dim * 8),
             nn.PReLU(),
             nn.Linear(self._embedding_dim * 8, self._num_factors * 2),
         )
-        self.weights_skip = nn.Linear(self._embedding_dim * 2, self._num_factors * 2)
+        self.weights_skip = nn.Linear(self._embedding_dim , self._num_factors * 2)
 
     def _predict_param(self, params, param, index, predictions, name, trace,
                        predict=True, guide=None):
@@ -194,7 +205,8 @@ class DeepTFADecoder(nn.Module):
         log_widths_predictions = factor_params[:, :, 3]
 
         joint_embed = torch.cat((subject_embed, task_embed), dim=-1)
-        weight_predictions = (self.weights_embedding(joint_embed) + self.weights_skip(joint_embed)).view(
+        interaction_embed = self.interaction_embedding(joint_embed) + self.interaction_skip(joint_embed)
+        weight_predictions = (self.weights_embedding(interaction_embed) + self.weights_skip(interaction_embed)).view(
             -1, self._num_factors, 2
         )
         weight_predictions = weight_predictions.unsqueeze(1).expand(
