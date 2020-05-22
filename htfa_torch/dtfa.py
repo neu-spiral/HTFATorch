@@ -26,6 +26,7 @@ import nilearn.image
 import nilearn.plotting as niplot
 import numpy as np
 from ordered_set import OrderedSet
+import scipy
 import scipy.io as sio
 import torch
 import torch.distributions as dists
@@ -873,6 +874,52 @@ class DeepTFA:
                 fig.savefig(filename)
             if show:
                 fig.show()
+
+    def subject_embedding_fligner(self, labeler=None, filename='', show=True,
+                                  xlims=None, ylims=None, figsize=utils.FIGSIZE,
+                                  colormap=plt.rcParams['image.cmap'],
+                                  serialize_data=True, alpha=0.05):
+        if filename == '':
+            filename = self.common_name() + '_subject_fligner.pdf'
+        hyperparams = self.variational.hyperparams.state_vardict()
+        z_p_mu = hyperparams['subject']['mu'].data
+        z_p_sigma = torch.exp(hyperparams['subject']['log_sigma'].data)
+        subjects = self.subjects()
+
+        minus_lims = torch.min(z_p_mu - z_p_sigma * 2, dim=0)[0].tolist()
+        plus_lims = torch.max(z_p_mu + z_p_sigma * 2, dim=0)[0].tolist()
+        if not xlims:
+            xlims = (minus_lims[0], plus_lims[0])
+        if not ylims:
+            ylims = (minus_lims[1], plus_lims[1])
+
+        if labeler is None:
+            labeler = lambda s: s
+        labels = sorted(list({labeler(s) for s in subjects}))
+        populations = {}
+        locs = [None for _ in labels]
+        for l, label in enumerate(labels):
+            label_subjects = [i for i, s in enumerate(subjects)
+                              if labeler(s) == label]
+            populations[label] = {
+                'loc': z_p_mu[label_subjects],
+                'scale': z_p_sigma[label_subjects],
+            }
+            locs[l] = z_p_mu[label_subjects].detach().cpu().numpy()
+
+        stat, p = scipy.stats.fligner(*locs, center=None, proportiontocut=None)
+
+        if serialize_data:
+            tensors_filename = os.path.splitext(filename)[0] + '.dat'
+            tensors = {
+                'labels': labels,
+                'populations': populations,
+                'locs': locs,
+                'stat': stat, 'pvalue': p,
+            }
+            torch.save(tensors, tensors_filename)
+
+        return p < alpha, stat, p
 
     def scatter_subject_embedding(self, labeler=None, filename='', show=True,
                                   xlims=None, ylims=None, figsize=utils.FIGSIZE,
