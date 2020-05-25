@@ -47,7 +47,8 @@ EPOCH_MSG = '[Epoch %d] (%dms) Posterior free-energy %.8e = KL from prior %.8e -
 class DeepTFA:
     """Overall container for a run of Deep TFA"""
     def __init__(self, query, mask, num_factors=tfa_models.NUM_FACTORS,
-                 embedding_dim=2, model_time_series=True, query_name=None):
+                 embedding_dim=2, model_time_series=True, query_name=None,
+                 task_embedding_initializer=None):
         self.num_factors = num_factors
         self._time_series = model_time_series
         self._common_name = query_name
@@ -107,12 +108,20 @@ class DeepTFA:
             self.voxel_locations, block_subjects, block_tasks,
             self.num_factors, self.num_blocks, self.num_times, embedding_dim
         )
+        if task_embedding_initializer:
+            with open(task_embedding_initializer, 'rb') as f:
+                task_embeddings = pickle.load(f)
+            task_embeddings['labels'] = [subjects.index(label) for label
+                                         in task_embeddings['labels']]
+        else:
+            task_embeddings = None
         self.variational = dtfa_models.DeepTFAGuide(self.num_factors,
                                                     block_subjects, block_tasks,
                                                     self.num_blocks,
                                                     self.num_times,
                                                     embedding_dim, hyper_means,
-                                                    model_time_series)
+                                                    model_time_series,
+                                                    task_embeddings=task_embeddings)
 
     def subjects(self):
         return OrderedSet([b.subject for b in self._blocks])
