@@ -265,7 +265,7 @@ class DeepTFAGuide(nn.Module):
     """Variational guide for deep topographic factor analysis"""
     def __init__(self, num_factors, block_subjects, block_tasks, num_blocks=1,
                  num_times=[1], embedding_dim=2, hyper_means=None,
-                 time_series=True):
+                 time_series=True, task_embeddings=None):
         super(self.__class__, self).__init__()
         self._num_blocks = num_blocks
         self._num_times = num_times
@@ -283,7 +283,8 @@ class DeepTFAGuide(nn.Module):
                                                    self._num_factors,
                                                    num_subjects, num_tasks,
                                                    hyper_means,
-                                                   embedding_dim, time_series)
+                                                   embedding_dim, time_series,
+                                                   task_embeddings)
 
     def forward(self, decoder, trace, times=None, blocks=None,
                 num_particles=tfa_models.NUM_PARTICLES):
