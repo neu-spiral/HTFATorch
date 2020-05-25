@@ -87,9 +87,12 @@ class DeepTFAGuideHyperparams(tfa_models.HyperParams):
                                          self._num_factors),
             }
         if task_embeddings:
+            task_embeddings['z_s'] = torch.tensor(task_embeddings['z_s']['mu'])
+            task_embeddings['z_s'] = task_embeddings['z_s'] - task_embeddings['z_s'].mean(dim=0)
+            task_embeddings['z_s'] = task_embeddings['z_s'] / task_embeddings['z_s'].var(dim=0)
             for i, z_s_mu in enumerate(task_embeddings['z_s']):
                 s = task_embeddings['labels'][i]
-                params['task']['mu'][s] = z_s_mu
+                params['task']['mu'][s] = z_s_mu.detach()
 
         super(self.__class__, self).__init__(params, guide=True)
 
