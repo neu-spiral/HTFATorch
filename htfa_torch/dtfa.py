@@ -111,7 +111,7 @@ class DeepTFA:
         if task_embedding_initializer:
             with open(task_embedding_initializer, 'rb') as f:
                 task_embeddings = pickle.load(f)
-            task_embeddings['labels'] = [subjects.index(label) for label
+            task_embeddings['labels'] = [tasks.index(label) for label
                                          in task_embeddings['labels']]
         else:
             task_embeddings = None
