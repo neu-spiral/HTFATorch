@@ -89,7 +89,7 @@ class DeepTFAGuideHyperparams(tfa_models.HyperParams):
         if task_embeddings:
             for i, z_s_mu in enumerate(task_embeddings['z_s']):
                 s = task_embeddings['labels'][i]
-                params['subject']['mu'][s] = z_s_mu
+                params['task']['mu'][s] = z_s_mu
 
         super(self.__class__, self).__init__(params, guide=True)
 
