@@ -46,7 +46,8 @@ class DeepTFAGenerativeHyperparams(tfa_models.HyperParams):
 
 class DeepTFAGuideHyperparams(tfa_models.HyperParams):
     def __init__(self, num_blocks, num_times, num_factors, num_subjects,
-                 num_tasks, hyper_means, embedding_dim=2, time_series=True):
+                 num_tasks, hyper_means, embedding_dim=2, time_series=True,
+                 task_embeddings=None):
         self.num_blocks = num_blocks
         self.num_subjects = num_subjects
         self.num_tasks = num_tasks
@@ -85,6 +86,10 @@ class DeepTFAGuideHyperparams(tfa_models.HyperParams):
                 'log_sigma': torch.zeros(self.num_blocks, self.num_times,
                                          self._num_factors),
             }
+        if task_embeddings:
+            for i, z_s_mu in enumerate(task_embeddings['z_s']):
+                s = task_embeddings['labels'][i]
+                params['subject']['mu'][s] = z_s_mu
 
         super(self.__class__, self).__init__(params, guide=True)
 
