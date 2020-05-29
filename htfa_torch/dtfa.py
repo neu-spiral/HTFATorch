@@ -476,7 +476,7 @@ class DeepTFA:
         return result
 
     def reconstruction(self, block=None, subject=None, task=None, t=0):
-        results = self.results(block, subject, task)
+        results = self.results(block, subject, task, generative=t is None)
         reconstruction = results['weights'] @ results['factors']
 
         image = utils.cmu2nii(reconstruction.numpy(),
