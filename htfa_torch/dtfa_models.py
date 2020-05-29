@@ -222,7 +222,7 @@ class DeepTFADecoder(nn.Module):
                 weight_params = {
                     'weights': {
                         'mu': params['weights']['mu'][:, :, i],
-                        'sigma': params['weights']['sigma'][:, :, i],
+                        'log_sigma': params['weights']['log_sigma'][:, :, i],
                     }
                 }
             else:
