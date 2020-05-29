@@ -371,10 +371,11 @@ class DeepTFA:
                  prior_kl.mean(dim=0).item()],
                 [iwae_free_energy, iwae_log_likelihood, iwae_prior_kl]]
 
-    def results(self, block=None, subject=None, task=None, hist_weights=False):
+    def results(self, block=None, subject=None, task=None, hist_weights=False,
+                generative=False):
         hyperparams = self.variational.hyperparams.state_vardict()
         for k, v in hyperparams.items():
-            hyperparams[k] = v.expand(1, *v.shape)
+            hyperparams[k] = v.unsqueeze(0)
 
         guide = probtorch.Trace()
         if block is not None:
@@ -423,7 +424,7 @@ class DeepTFA:
                     value=hyperparams['task']['mu'][:, task],
                     name='z^S_{%d,%d}' % (task, b),
                 )
-            if self._time_series:
+            if self._time_series and generative:
                 for k, v in hyperparams['weights'].items():
                     hyperparams['weights'][k] = v[:, :, times[0]:times[1]]
                 weights_params = hyperparams['weights']
@@ -435,9 +436,15 @@ class DeepTFA:
                     name='Weights%d_%d-%d' % (b, times[0], times[1])
                 )
 
+
+        if generative:
+            for k, v in hyperparams.items():
+                hyperparams[k] = v.squeeze(0)
+
         weights, factor_centers, factor_log_widths =\
             self.decoder(probtorch.Trace(), blocks, block_subjects, block_tasks,
-                         hyperparams, times, guide=guide, num_particles=1)
+                         hyperparams, times, guide=guide, num_particles=1,
+                         generative=generative)
 
         if block is not None:
             weights = weights[0]
@@ -459,6 +466,9 @@ class DeepTFA:
             'factor_centers': factor_centers.data,
             'factor_log_widths': factor_log_widths.data,
         }
+        if generative:
+            for k, v in hyperparams.items():
+                hyperparams[k] = v.unsqueeze(0)
         if subject is not None:
             result['z^P_%d' % subject] = hyperparams['subject']['mu'][:, subject]
         if task is not None:
