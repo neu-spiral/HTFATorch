@@ -134,15 +134,13 @@ class DeepTFADecoder(nn.Module):
                                  torch.min(locations, dim=0)[0])
             self.register_buffer('locations_max',
                                  torch.max(locations, dim=0)[0])
+        self.time_series_embedding = nn.GRUCell(self._embedding_dim * 2,
+                                                self._num_factors)
         self.weights_embedding = nn.Sequential(
-            nn.Linear(self._num_factors + self._embedding_dim * 2,
-                      self._embedding_dim * 4),
+            nn.Linear(self._num_factors, self._num_factors // 2),
             nn.PReLU(),
-            nn.Linear(self._embedding_dim * 4, self._embedding_dim * 8),
-            nn.PReLU(),
-            nn.Linear(self._embedding_dim * 8, self._num_factors * 2),
+            nn.Linear(self._num_factors // 2, self._num_factors * 2)
         )
-        self.weights_skip = nn.Linear(self._embedding_dim * 2, self._num_factors * 2)
 
     def _predict_param(self, params, param, index, predictions, name, trace,
                        predict=True, guide=None):
@@ -209,31 +207,30 @@ class DeepTFADecoder(nn.Module):
             guide=guide,
         )
 
-        weight_predictions = [None for _ in range(times[1] - times[0])]
-        weight_prediction = torch.zeros(subject_embed.shape[0],
-                                        self._num_factors).to(subject_embed)
-        for i in range(times[1] - times[0]):
-            joint_embed = torch.cat((weight_prediction, subject_embed,
-                                     task_embed), dim=-1)
-            next_prediction = self.weights_embedding(joint_embed).view(
+        joint_embed = torch.cat((subject_embed, task_embed), dim=-1)
+        weight_predictions = []
+        next_embed = None
+        for t in range(times[0], times[1]):
+            next_embed = self.time_series_embedding(joint_embed, next_embed)
+            next_prediction = self.weights_embedding(next_embed).view(
                 -1, self._num_factors, 2
             )
             if self._time_series and 'weights' in params:
                 weight_params = {
                     'weights': {
-                        'mu': params['weights']['mu'][:, :, i],
-                        'log_sigma': params['weights']['log_sigma'][:, :, i],
+                        'mu': params['weights']['mu'][:, :, t],
+                        'log_sigma': params['weights']['log_sigma'][:, :, t],
                     }
                 }
             else:
                 weight_params = params
             next_prediction = self._predict_param(
                 weight_params, 'weights', block, next_prediction,
-                'Weights%d_%d' % (block, times[0] + i), trace,
+                'Weights%d_%d' % (block, t), trace,
                 predict=generative or block < 0 or not self._time_series,
                 guide=guide,
             )
-            weight_predictions[i] = next_prediction
+            weight_predictions.append(next_prediction)
         weight_predictions = torch.stack(weight_predictions, dim=1)
 
         return centers_predictions, log_widths_predictions, weight_predictions
