@@ -39,6 +39,13 @@ PAGE_WIDTH = 8.5
 PAGE_HEIGHT = 11
 FIGSIZE = (COLUMN_WIDTH, 0.25 * PAGE_HEIGHT)
 
+def clamp_locations(locations, min, max):
+    locations = torch.where(locations <= min, min.expand(*locations.shape),
+                            locations)
+    locations = torch.where(locations >= max, max.expand(*locations.shape),
+                            locations)
+    return locations
+
 def striping_diagonal_indices(rows, cols):
     for row in range(rows):
         for col in range(cols):
@@ -247,9 +254,9 @@ def adjust_learning_rate(optimizer, adjustment):
         param_group['lr'] *= adjustment
 
 def brain_centroid(locations):
-    brain_center = torch.mean(locations, 0).unsqueeze(0)
-    brain_center_std_dev = torch.diagflat(torch.sqrt(torch.var(locations, 0)))
-    return brain_center, brain_center_std_dev.unsqueeze(0)
+    brain_center = locations.mean(dim=0).unsqueeze(0)
+    brain_center_std_dev = locations.std(dim=0).unsqueeze(0)
+    return brain_center, brain_center_std_dev
 
 def initial_radial_basis(location, center, widths):
     """The radial basis function used as the shape for the factors"""
@@ -290,7 +297,9 @@ def initial_hypermeans(activations, locations, num_factors, hotspot=False):
             ind = np.argmax(activations_mean)
             centers[k, :] = locations[ind, :]
             widths[k] = init_width(activations_mean, locations, activations_mean[ind], centers[k, :])
-            activations_mean = activations_mean - activations_mean[ind]*initial_radial_basis(locations, np.expand_dims(centers[k, :],axis=0), widths[k])
+            activations_mean = activations_mean - activations_mean[ind]*\
+                               initial_radial_basis(locations, np.expand_dims(centers[k, :],axis=0),
+                                                    np.array([widths[k]]))
             activations_mean = activations_mean.squeeze()
         initial_centers = centers
         initial_widths = widths
@@ -694,7 +703,7 @@ def populate_vardict(vdict, populator, *dims):
 def gaussian_populator(*dims):
     return {
         'mu': torch.zeros(*dims),
-        'sigma': torch.ones(*dims)
+        'log_sigma': torch.ones(*dims).log()
     }
 
 def uncertainty_alphas(uncertainties, scalars=None):

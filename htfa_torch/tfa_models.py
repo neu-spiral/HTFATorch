@@ -92,17 +92,17 @@ class TFAGuideHyperParams(HyperParams):
         params = utils.vardict()
         params['weights'] = {
             'mu': means['weights'],
-            'sigma': torch.sqrt(torch.rand(
+            'log_sigma': torch.sqrt(torch.rand(
                 (self._num_times, self._num_factors)
-            ))
+            )).log()
         }
         params['factor_centers'] = {
             'mu': means['factor_centers'],
-            'sigma': torch.sqrt(torch.rand((self._num_factors, 3)))
+            'log_sigma': torch.sqrt(torch.rand((self._num_factors, 3))).log()
         }
         params['factor_log_widths'] = {
             'mu': means['factor_log_widths'] * torch.ones(self._num_factors),
-            'sigma': torch.sqrt(torch.rand((self._num_factors)))
+            'log_sigma': torch.sqrt(torch.rand((self._num_factors))).log()
         }
         super(self.__class__, self).__init__(params, guide=True)
 
@@ -120,7 +120,7 @@ class TFAGuidePrior(GuidePrior):
 
         weight_params = {
             'mu': params['weights']['mu'][times[0]:times[1], :],
-            'sigma': params['weights']['sigma'][times[0]:times[1], :]
+            'log_sigma': params['weights']['log_sigma'][times[0]:times[1], :]
         }
 
         if num_particles and num_particles > 0:
@@ -132,15 +132,15 @@ class TFAGuidePrior(GuidePrior):
                                                                True)
 
         weights = trace.normal(weight_params['mu'],
-                               softplus(weight_params['sigma']),
+                               torch.exp(weight_params['log_sigma']),
                                name='Weights%dt%d-%d' % (self.block, times[0], times[1]))
 
         centers = trace.normal(params['factor_centers']['mu'],
-                               softplus(params['factor_centers']['sigma']),
+                               torch.exp(params['factor_centers']['log_sigma']),
                                name='FactorCenters' + str(self.block))
         log_widths = trace.normal(
             params['factor_log_widths']['mu'],
-            softplus(params['factor_log_widths']['sigma']),
+            torch.exp(params['factor_log_widths']['log_sigma']),
             name='FactorLogWidths' + str(self.block)
         )
         return weights, centers, log_widths
@@ -166,16 +166,16 @@ class TFAGenerativeHyperParams(HyperParams):
         params = utils.vardict()
         params['weights'] = {
             'mu': torch.zeros((self._num_factors)),
-            'sigma': SOURCE_WEIGHT_STD_DEV * torch.ones((self._num_factors))
+            'log_sigma': (SOURCE_WEIGHT_STD_DEV * torch.ones((self._num_factors))).log()
         }
         params['factor_centers'] = {
             'mu': brain_center.expand(self._num_factors, 3) *\
                 torch.ones((self._num_factors, 3)),
-            'sigma': brain_center_std_dev * SOURCE_CENTER_STD_DEV
+            'log_sigma': torch.log(brain_center_std_dev * SOURCE_CENTER_STD_DEV)
         }
         params['factor_log_widths'] = {
             'mu': torch.ones((self._num_factors)),
-            'sigma': SOURCE_LOG_WIDTH_STD_DEV * torch.ones((self._num_factors))
+            'log_sigma': (SOURCE_LOG_WIDTH_STD_DEV * torch.ones((self._num_factors))).log()
         }
         params['voxel_noise'] = torch.ones(1) * voxel_noise
 
@@ -200,17 +200,17 @@ class TFAGenerativePrior(GenerativePrior):
         )
 
         weights = trace.normal(weight_params['mu'],
-                               weight_params['sigma'],
+                               torch.exp(weight_params['log_sigma']),
                                value=guide['Weights%dt%d-%d' % (self.block, times[0], times[1])],
                                name='Weights%dt%d-%d' % (self.block, times[0], times[1]))
 
-        factor_centers = trace.multivariate_normal(
-            params['factor_centers']['mu'], params['factor_centers']['sigma'],
+        factor_centers = trace.normal(
+            params['factor_centers']['mu'], torch.exp(params['factor_centers']['log_sigma']),
             value=guide['FactorCenters' + str(self.block)],
             name='FactorCenters' + str(self.block)
         )
         factor_log_widths = trace.normal(params['factor_log_widths']['mu'],
-                                         params['factor_log_widths']['sigma'],
+                                         torch.exp(params['factor_log_widths']['log_sigma']),
                                          value=guide['FactorLogWidths' + str(self.block)],
                                          name='FactorLogWidths' + str(self.block))
 
@@ -229,18 +229,22 @@ class TFAGenerativeLikelihood(GenerativeLikelihood):
         self.block = block
 
     def forward(self, trace, weights, centers, log_widths, params, times=None,
-                observations=collections.defaultdict()):
+                observations=collections.defaultdict(), block=None,
+                locations=None):
         if times is None:
             times = (0, self._num_times)
 
-        factors = radial_basis(Variable(self.voxel_locations,
-                                        requires_grad=True),
-                               centers, log_widths)
-
+        if locations is not None:
+            voxel_locations = locations
+        else:
+            voxel_locations = self.voxel_locations
+        factors = radial_basis(voxel_locations, centers, log_widths)
+        block = block if block is not None else self.block
         activations = trace.normal(weights @ factors,
-                                   softplus(params['voxel_noise'])[0],
+                                   params['voxel_noise'][0],
                                    value=observations['Y'],
-                                   name='Y%dt%d-%d' % (self.block, times[0], times[1]))
+                                   name='Y%dt%d-%d' % (block, times[0],
+                                                       times[1]))
         return activations
 
 class TFAModel(nn.Module):
