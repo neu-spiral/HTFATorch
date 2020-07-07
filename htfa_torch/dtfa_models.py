@@ -107,8 +107,10 @@ class DeepTFADecoder(nn.Module):
 
         self.factors_embedding = nn.Sequential(
             nn.Linear(self._embedding_dim, self._embedding_dim * 2),
+            nn.LayerNorm(self._embedding_dim * 2),
             nn.PReLU(),
             nn.Linear(self._embedding_dim * 2, self._embedding_dim * 4),
+            nn.LayerNorm(self._embedding_dim * 4),
             nn.PReLU(),
             nn.Linear(self._embedding_dim * 4, self._num_factors * 4 * 2),
         )
@@ -136,8 +138,10 @@ class DeepTFADecoder(nn.Module):
                                  torch.max(locations, dim=0)[0])
         self.weights_embedding = nn.Sequential(
             nn.Linear(self._embedding_dim * 2, self._embedding_dim * 4),
+            nn.LayerNorm(self._embedding_dim * 4),
             nn.PReLU(),
             nn.Linear(self._embedding_dim * 4, self._embedding_dim * 8),
+            nn.LayerNorm(self._embedding_dim * 8),
             nn.PReLU(),
             nn.Linear(self._embedding_dim * 8, self._num_factors * 2),
         )
