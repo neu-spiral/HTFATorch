@@ -109,13 +109,15 @@ class FMriActivationsDb:
         del block_dict['locations']
         self._table.update(block_dict, cols)
 
-    def upsert(self, block):
+    def upsert(self, block, strip_id=False):
         if self.mask is not None:
             block.mask = self.mask
             block.smooth = self.smooth
         block_dict = block.__dict__.copy()
         del block_dict['activations']
         del block_dict['locations']
+        if strip_id:
+            del block_dict['id']
         block_dict['individual_differences'] =\
             json.dumps(block_dict['individual_differences'])
         block_dict['rest_start_times'] =\
