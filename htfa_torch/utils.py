@@ -364,8 +364,8 @@ def nii2cmu(nifti_file, mask_file=None, smooth=None, zscore=False,
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             image = nib.load(nifti_file)
-            mask = NiftiMasker(mask_strategy='background', smoothing_fwhm=smooth,
-                               standardize=False)
+            mask = NiftiMasker(mask_strategy='background',
+                               smoothing_fwhm=smooth, standardize=False)
             if mask_file is None:
                 mask.fit(nifti_file)
             else:
@@ -376,10 +376,16 @@ def nii2cmu(nifti_file, mask_file=None, smooth=None, zscore=False,
         voxel_activations = np.float64(mask.transform(nifti_file)).transpose()
         rest_activations = voxel_activations[:, rest_starts[0]:rest_ends[0]]
         for i in range(1, len(rest_starts)):
-            rest_activations = np.hstack((rest_activations, voxel_activations[:, rest_starts[i]:rest_ends[i]]))
-        standard_transform = sklearn.preprocessing.StandardScaler().fit(rest_activations.T)
+            rest_activations = np.hstack(
+                (rest_activations,
+                 voxel_activations[:, rest_starts[i]:rest_ends[i]])
+            )
+        standard_transform = sklearn.preprocessing.StandardScaler().fit(
+            rest_activations.T
+        )
         voxel_activations = standard_transform.transform(voxel_activations.T).T
-        voxel_coordinates = np.array(np.nonzero(mask.mask_img_.dataobj)).transpose()
+        voxel_coordinates = np.array(np.nonzero(mask.mask_img_.dataobj))
+        voxel_coordinates = voxel_coordinates.transpose()
         voxel_coordinates = np.hstack((voxel_coordinates,
                                        np.ones((voxel_coordinates.shape[0], 1))))
         voxel_locations = (voxel_coordinates @ sform.T)[:, :3]
@@ -387,8 +393,8 @@ def nii2cmu(nifti_file, mask_file=None, smooth=None, zscore=False,
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             image = nib.load(nifti_file)
-            mask = NiftiMasker(mask_strategy='background', smoothing_fwhm=smooth,
-                               standardize=zscore)
+            mask = NiftiMasker(mask_strategy='background',
+                               smoothing_fwhm=smooth, standardize=zscore)
             if mask_file is None:
                 mask.fit(nifti_file)
             else:
@@ -398,7 +404,8 @@ def nii2cmu(nifti_file, mask_file=None, smooth=None, zscore=False,
         sform = image.get_sform()
         voxel_size = header.get_zooms()
         voxel_activations = np.float64(mask.transform(nifti_file)).transpose()
-        voxel_coordinates = np.array(np.nonzero(mask.mask_img_.dataobj)).transpose()
+        voxel_coordinates = np.array(np.nonzero(mask.mask_img_.dataobj))
+        voxel_coordinates = voxel_coordinates.transpose()
         voxel_coordinates = np.hstack((voxel_coordinates,
                                        np.ones((voxel_coordinates.shape[0], 1))))
         voxel_locations = (voxel_coordinates @ sform.T)[:, :3]
@@ -446,15 +453,16 @@ def load_collective_dataset(data_files, mask):
 
     return activations, locations, names, templates
 
-def load_dataset(data_file, mask=None, zscore=True,
-                 zscore_by_rest=False, smooth=None, rest_starts=None, rest_ends=None):
+def load_dataset(data_file, mask=None, zscore=True, zscore_by_rest=False,
+                 smooth=None, rest_starts=None, rest_ends=None):
     name, ext = os.path.splitext(data_file)
     if ext == 'mat':
         dataset = sio.loadmat(data_file)
         template = None
     else:
         dataset = nii2cmu(data_file, mask_file=mask, smooth=smooth,
-                          zscore=zscore,zscore_by_rest=zscore_by_rest,rest_starts=rest_starts,rest_ends=rest_ends)
+                          zscore=zscore, zscore_by_rest=zscore_by_rest,
+                          rest_starts=rest_starts, rest_ends=rest_ends)
         template = data_file
     _, name = os.path.split(name)
     # pull out the voxel activations and locations
