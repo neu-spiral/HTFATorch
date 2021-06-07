@@ -50,7 +50,7 @@ class FMriActivationBlock(object):
         self.activations, self.locations, _, _ =\
             lru_load_dataset(self.filename, self.mask, self._zscore,
                              self.smooth, self._zscore_by_rest,
-                             self.rest_start_times,self.rest_end_times)
+                             self.rest_start_times, self.rest_end_times)
         if self.start_time is None:
             self.start_time = 0
         if self.end_time is None:
