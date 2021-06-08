@@ -73,15 +73,15 @@ class FMriActivationBlock(object):
     def default_label(self):
         return "subject%d_run%d_block%d" % (self.subject, self.run, self.block)
 
-    def write_wds(self, sink):
+    def format_wds(self):
         if self.activations is None:
             self.load()
         basename, _ = os.path.splitext(os.path.basename(self.filename))
 
         for t in range(len(self)):
-            sink.write({
+            yield {
                 '__key__': basename + ('_%06d' % (self.start_time + t)),
-                'activations.pth': self.activations[t].to_sparse(),
+                'pth': self.activations[t].to_sparse(),
                 'time.index': t,
                 'block.id': self.block,
                 'run.id': self.run,
@@ -89,7 +89,7 @@ class FMriActivationBlock(object):
                 'task.txt': self.task,
                 'individual_differences.json':\
                     json.dumps(self.individual_differences)
-            })
+            }
 
 class FMriActivationsDb:
     def __init__(self, name, mask=None, smooth=None):
