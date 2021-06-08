@@ -18,11 +18,10 @@ import torch.utils.data
 from . import utils
 
 @lru_cache(maxsize=16)
-def lru_load_dataset(fname, mask, zscore, smooth,
-                     zscore_by_rest=False,rest_starts=None,
-                     rest_ends=None):
+def lru_load_dataset(fname, mask, zscore, smooth, zscore_by_rest=False,
+                     rest_starts=None, rest_ends=None):
     logging.info('Loading Nifti image %s with mask %s (zscore=%s, smooth=%s, zscore_by_rest=%s)',
-                 fname, mask, zscore, smooth,zscore_by_rest)
+                 fname, mask, zscore, smooth, zscore_by_rest)
     return utils.load_dataset(fname, mask, smooth=smooth, zscore=zscore,
                               zscore_by_rest=zscore_by_rest, rest_starts=rest_starts,
                               rest_ends=rest_ends)
