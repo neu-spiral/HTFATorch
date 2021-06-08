@@ -87,6 +87,7 @@ class FMriActivationBlock(object):
                 'run.id': self.run,
                 'subject.id': self.subject,
                 'task.txt': self.task,
+                'template.txt': self.filename,
                 'individual_differences.json':\
                     json.dumps(self.individual_differences)
             }
