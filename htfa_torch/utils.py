@@ -403,7 +403,7 @@ def nii2cmu(nifti_file, mask_file=None, smooth=None, zscore=False,
         header = image.header
         sform = image.get_sform()
         voxel_size = header.get_zooms()
-        voxel_activations = np.float64(mask.transform(nifti_file)).transpose()
+        voxel_activations = mask.transform(nifti_file).transpose()
         voxel_coordinates = np.array(np.nonzero(mask.mask_img_.dataobj))
         voxel_coordinates = voxel_coordinates.transpose()
         voxel_coordinates = np.hstack((voxel_coordinates,
