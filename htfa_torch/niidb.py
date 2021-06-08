@@ -10,6 +10,7 @@ from functools import lru_cache
 import json
 import logging
 from ordered_set import OrderedSet
+import os
 import types
 
 import dataset
@@ -71,6 +72,24 @@ class FMriActivationBlock(object):
 
     def default_label(self):
         return "subject%d_run%d_block%d" % (self.subject, self.run, self.block)
+
+    def write_wds(self, sink):
+        if self.activations is None:
+            self.load()
+        basename, _ = os.path.splitext(os.path.basename(self.filename))
+
+        for t in range(len(self)):
+            sink.write({
+                '__key__': basename + ('_%06d' % (self.start_time + t)),
+                'activations.pth': self.activations[t].to_sparse(),
+                'time.index': t,
+                'block.id': self.block,
+                'run.id': self.run,
+                'subject.id': self.subject,
+                'task.txt': self.task,
+                'individual_differences.json':\
+                    json.dumps(self.individual_differences)
+            })
 
 class FMriActivationsDb:
     def __init__(self, name, mask=None, smooth=None):
