@@ -30,14 +30,16 @@ class FmriTarDataset:
                         decode()
         self.voxel_locations = metadata['voxel_locations']
 
-        self._blocks = self._unique_properties(lambda tr: {
-            'id': tr['block.id'],
-            'run': tr['run.id'],
-            'subject': tr['subject.id'],
-            'task': tr['task.txt'],
-            'template': tr['template.txt'],
-            'times': []
-        })
+        self._blocks = {}
+        for block in metadata['blocks']:
+            self._blocks[block['block']] = {
+                'id': block['block'],
+                'run': block['run'],
+                'subject': block['subject'],
+                'task': block['task'],
+                'template': block['template'],
+                'times': []
+            }
         for tr in self._dataset:
             self.blocks[tr['block.id']]['times'].append(tr['time.index'])
 
@@ -66,11 +68,9 @@ class FmriTarDataset:
 
     def data(self):
         return self._dataset.rename(
-            activations='pth', t='time.index', block='block.id', run='run.id',
-            subject='subject.id', task='task.txt', template='template.txt',
-            individual_differences='individual_differences.json',
-            __key__='__key__').\
-        map(_densify)
+            activations='pth', t='time.index', block='block.id',
+            __key__='__key__'
+        ).map(_densify)
 
     def mean_block(self):
         num_times = max(row['time.index'] for row in self._dataset) + 1
@@ -82,8 +82,8 @@ class FmriTarDataset:
     def normalize_activations(self):
         subject_runs = self.subject_runs()
         run_activations = {(subject, run): [tr['pth'] for tr in self._dataset
-                                            if tr['run.id'] == run and\
-                                            tr['subject.id'] == subject]
+                                            if self.blocks[tr['block.id']]['run'] == run and\
+                                            self.blocks[tr['block.id']]['subject'] == subject]
                            for subject, run in subject_runs}
         for sr, acts in run_activations.items():
             run_activations[sr] = torch.stack([act.to_dense() for act in acts],
@@ -91,7 +91,7 @@ class FmriTarDataset:
 
         normalizers = []
         sufficient_stats = []
-        for block in self.blocks:
+        for block in self.blocks.values():
             activations = run_activations[(block['subject'], block['run'])]
             normalizers.append(torch.abs(activations).max())
             sufficient_stats.append((torch.mean(activations, dim=0),
@@ -100,17 +100,20 @@ class FmriTarDataset:
         return normalizers, sufficient_stats
 
     def runs(self):
-        return self._unique_properties(lambda b: b['run'], self.blocks)
+        return self._unique_properties(lambda b: b['run'], self.blocks.values())
 
     def subjects(self):
-        return self._unique_properties(lambda b: b['subject'], self.blocks)
+        return self._unique_properties(lambda b: b['subject'],
+                                       self.blocks.values())
 
     def subject_runs(self):
         return self._unique_properties(lambda b: (b['subject'], b['run']),
-                                       self.blocks)
+                                       self.blocks.values())
 
     def tasks(self):
-        return self._unique_properties(lambda b: b['task'], self.blocks)
+        return self._unique_properties(lambda b: b['task'],
+                                       self.blocks.values())
 
     def templates(self):
-        return self._unique_properties(lambda b: b['template'], self.blocks)
+        return self._unique_properties(lambda b: b['template'],
+                                       self.blocks.values())
