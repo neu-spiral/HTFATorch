@@ -101,10 +101,10 @@ class DeepTFA:
                                                     model_time_series)
 
     def subjects(self):
-        return OrderedSet([b.subject for b in self._blocks])
+        return self._dataset.subjects()
 
     def tasks(self):
-        return OrderedSet([b.task for b in self._blocks])
+        return self._dataset.tasks()
 
     def num_parameters(self):
         parameters = list(self.variational.parameters()) +\
@@ -113,19 +113,17 @@ class DeepTFA:
 
     def train(self, num_steps=10, learning_rate=tfa.LEARNING_RATE,
               log_level=logging.WARNING, num_particles=tfa_models.NUM_PARTICLES,
-              batch_size=64, use_cuda=True, checkpoint_steps=None,
-              blocks_batch_size=4, patience=10, train_globals=True,
-              blocks_filter=lambda block: True):
+              batch_size=256, use_cuda=True, checkpoint_steps=None, patience=10,
+              train_globals=True, blocks_filter=lambda block: True):
         """Optimize the variational guide to reflect the data for `num_steps`"""
         logging.basicConfig(format='%(asctime)s %(message)s',
                             datefmt='%m/%d/%Y %H:%M:%S',
                             level=log_level)
         # S x T x V -> T x S x V
-        training_blocks = [(b, block) for (b, block) in enumerate(self._blocks)
-                           if blocks_filter(block)]
+        training_blocks = {block['id'] for block in self._dataset.blocks
+                           if blocks_filter(block)}
         activations_loader = torch.utils.data.DataLoader(
-            utils.TFADataset([block.activations
-                              for (_, block) in training_blocks]),
+            self._dataset.select(lambda tr: tr['block'] in training_blocks),
             batch_size=batch_size,
             pin_memory=True,
         )
@@ -146,22 +144,22 @@ class DeepTFA:
 
         param_groups = [{
             'params': [phi for phi in variational.parameters()
-                       if phi.shape[0] == len(self._blocks)],
+                       if phi.shape[0] == self.num_blocks],
             'lr': learning_rate['q'],
         }, {
             'params': [theta for theta in decoder.parameters()
-                       if theta.shape[0] == len(self._blocks)],
+                       if theta.shape[0] == self.num_blocks],
             'lr': learning_rate['p'],
         }]
         if train_globals:
             param_groups.append({
                 'params': [phi for phi in variational.parameters()
-                           if phi.shape[0] != len(self._blocks)],
+                           if phi.shape[0] != self.num_blocks],
                 'lr': learning_rate['q'],
             })
             param_groups.append({
                 'params': [theta for theta in decoder.parameters()
-                           if theta.shape[0] != len(self._blocks)],
+                           if theta.shape[0] != self.num_blocks],
                 'lr': learning_rate['p'],
             })
         optimizer = torch.optim.Adam(param_groups, amsgrad=True, eps=1e-4)
@@ -187,48 +185,46 @@ class DeepTFA:
                 epoch_free_energies[batch] = 0.0
                 epoch_lls[batch] = 0.0
                 epoch_prior_kls[batch] = 0.0
-                block_batches = utils.chunks(list(range(len(training_blocks))),
-                                             n=blocks_batch_size)
-                for block_batch in block_batches:
-                    activations = [{'Y': data[:, b, :]} for b in block_batch]
-                    block_batch = [training_blocks[b][0] for b in block_batch]
-                    if tfa.CUDA and use_cuda:
-                        for acts in activations:
-                            acts['Y'] = acts['Y'].cuda()
-                    trs = (batch * batch_size, None)
-                    trs = (trs[0], trs[0] + activations[0]['Y'].shape[0])
 
-                    optimizer.zero_grad()
-                    q = probtorch.Trace()
-                    variational(decoder, q, times=trs, blocks=block_batch,
-                                num_particles=num_particles)
-                    p = probtorch.Trace()
-                    generative(decoder, p, times=trs, guide=q,
-                               observations=activations, blocks=block_batch,
-                               locations=voxel_locations,
-                               num_particles=num_particles)
+                activations = data['activations']
+                if tfa.CUDA and use_cuda:
+                    activations = activations.cuda()
+                block_batch = list(data['block'].numpy())
 
-                    def block_rv_weight(node, prior=True):
-                        result = 1.0
-                        if measure_occurrences:
-                            rv_occurrences[node] += 1
-                        result /= rv_occurrences[node]
-                        return result
-                    free_energy, ll, prior_kl = tfa.hierarchical_free_energy(
-                        q, p,
-                        rv_weight=block_rv_weight,
-                        num_particles=num_particles
-                    )
+                trs = (data['t'][0].item(), data['t'][-1].item())
 
-                    free_energy.backward()
-                    optimizer.step()
-                    epoch_free_energies[batch] += free_energy
-                    epoch_lls[batch] += ll
-                    epoch_prior_kls[batch] += prior_kl
+                optimizer.zero_grad()
+                q = probtorch.Trace()
+                variational(decoder, q, times=trs, blocks=block_batch,
+                            num_particles=num_particles)
+                p = probtorch.Trace()
+                generative(decoder, p, times=trs, guide=q,
+                           observations=activations, blocks=block_batch,
+                           locations=voxel_locations,
+                           num_particles=num_particles)
 
-                    if tfa.CUDA and use_cuda:
-                        del activations
-                        torch.cuda.empty_cache()
+                def block_rv_weight(node, prior=True):
+                    result = 1.0
+                    if measure_occurrences:
+                        rv_occurrences[node] += 1
+                    result /= rv_occurrences[node]
+                    return result
+                free_energy, ll, prior_kl = tfa.hierarchical_free_energy(
+                    q, p,
+                    rv_weight=block_rv_weight,
+                    num_particles=num_particles
+                )
+
+                free_energy.backward()
+                optimizer.step()
+                epoch_free_energies[batch] += free_energy
+                epoch_lls[batch] += ll
+                epoch_prior_kls[batch] += prior_kl
+
+                if tfa.CUDA and use_cuda:
+                    del activations
+                    torch.cuda.empty_cache()
+
                 if tfa.CUDA and use_cuda:
                     epoch_free_energies[batch] = epoch_free_energies[batch].cpu().data.numpy()
                     epoch_lls[batch] = epoch_lls[batch].cpu().data.numpy()
@@ -520,32 +516,6 @@ class DeepTFA:
             niplot.show()
 
         return plot
-
-    def normalize_activations(self):
-        subject_runs = OrderedSet([(block.subject, block.run)
-                                   for block in self._blocks])
-        run_activations = {sr: None for sr in subject_runs}
-
-        for block in range(len(self._blocks)):
-            sr = (self._blocks[block].subject, self._blocks[block].run)
-            if run_activations[sr] is None:
-                run_activations[sr] = self.voxel_activations[block]
-            else:
-                run_activations[sr] = torch.cat((run_activations[sr],
-                                                 self.voxel_activations[block]),
-                                                dim=0)
-
-        for sr in run_activations:
-            run_activations[sr] = run_activations[sr].flatten()
-
-        self.activation_normalizers =\
-            [torch.abs(run_activations[(block.subject, block.run)]).max()
-             for block in self._blocks]
-        self.activation_sufficient_stats = [
-            (torch.mean(run_activations[(block.subject, block.run)], dim=0),
-             torch.std(run_activations[(block.subject, block.run)], dim=0))
-            for block in self._blocks]
-        return self.activation_normalizers
 
     def plot_factor_centers(self, block, filename='', show=True, t=None,
                             labeler=None, serialize_data=True):
@@ -969,10 +939,11 @@ class DeepTFA:
                                      legend_ordering=legend_ordering)
 
     def common_name(self):
-        if self._common_name:
-            return self._common_name
-        return os.path.commonprefix([os.path.basename(b.filename)
-                                     for b in self._blocks])
+        if not self._common_name:
+            self._common_name = os.path.commonprefix(
+                [os.path.basename(b['template']) for b in self._dataset.blocks]
+            )
+        return self._common_name
 
     def save_state(self, path='.', tag=''):
         name = self.common_name() + tag
