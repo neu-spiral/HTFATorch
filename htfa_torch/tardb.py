@@ -102,9 +102,6 @@ class FmriTarDataset:
     def runs(self):
         return self._unique_properties(lambda b: b['run'], self.blocks)
 
-    def select(self, f):
-        return self.data().select(f)
-
     def subjects(self):
         return self._unique_properties(lambda b: b['subject'], self.blocks)
 
