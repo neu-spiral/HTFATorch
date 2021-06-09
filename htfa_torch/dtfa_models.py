@@ -338,8 +338,6 @@ class DeepTFAModel(nn.Module):
                                                num_particles=num_particles,
                                                generative=True)
 
-        return [self.likelihood(trace, weights[i], centers[i], log_widths[i],
-                                params, times=times,
-                                observations=observations[i], block=b,
-                                locations=locations)
-                for (i, b) in enumerate(blocks)]
+        return self.likelihood(trace, weights, centers, log_widths, params,
+                               times=times, observations=observations,
+                               block=blocks, locations=locations)
