@@ -73,6 +73,16 @@ class FMriActivationBlock(object):
     def default_label(self):
         return "subject%d_run%d_block%d" % (self.subject, self.run, self.block)
 
+    def wds_metadata(self):
+        return {
+            'block': self.block,
+            'run': self.run,
+            'subject': self.subject,
+            'task': self.task,
+            'template': self.filename,
+            'individual_differences': self.individual_differences,
+        }
+
     def format_wds(self):
         if self.activations is None:
             self.load()
@@ -84,12 +94,6 @@ class FMriActivationBlock(object):
                 'pth': self.activations[t].to_sparse(),
                 'time.index': t,
                 'block.id': self.block,
-                'run.id': self.run,
-                'subject.id': self.subject,
-                'task.txt': self.task,
-                'template.txt': self.filename,
-                'individual_differences.json':\
-                    json.dumps(self.individual_differences)
             }
 
 class FMriActivationsDb:
