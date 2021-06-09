@@ -24,13 +24,11 @@ def _densify(tr):
 
 class FmriTarDataset:
     def __init__(self, path):
-        dataset = wds.WebDataset(path)
-        num_times = 0
-        for _ in dataset:
-            num_times += 1
+        metadata = torch.load(path + '.meta')
 
-        self._dataset = wds.WebDataset(path, length=num_times).decode()
-        self.voxel_locations = torch.load(path + '.voxel_locs.pth')
+        self._dataset = wds.WebDataset(path, length=metadata['num_times']).\
+                        decode()
+        self.voxel_locations = metadata['voxel_locations']
 
         self._blocks = self._unique_properties(lambda tr: {
             'id': tr['block.id'],
