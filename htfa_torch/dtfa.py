@@ -65,14 +65,16 @@ class DeepTFA:
 
         # Pull out relevant dimensions: the number of time instants and the
         # number of voxels in each timewise "slice"
-        self.num_times = [len(block['times']) for block in self._dataset.blocks]
+        self.num_times = [len(block['times']) for block
+                          in self._dataset.blocks.values()]
         self.num_voxels = self.voxel_locations.shape[0]
 
         subjects = self.subjects()
         tasks = self.tasks()
         block_subjects = [subjects.index(b['subject'])
-                          for b in self._dataset.blocks]
-        block_tasks = [tasks.index(b['task']) for b in self._dataset.blocks]
+                          for b in self._dataset.blocks.values()]
+        block_tasks = [tasks.index(b['task']) for b in
+                       self._dataset.blocks.values()]
 
         centers, widths, weights = utils.initial_hypermeans(
             self._dataset.mean_block().numpy().T, self.voxel_locations.numpy(),
@@ -120,13 +122,14 @@ class DeepTFA:
                             datefmt='%m/%d/%Y %H:%M:%S',
                             level=log_level)
         # S x T x V -> T x S x V
-        training_blocks = {block['id'] for block in self._dataset.blocks
+        training_blocks = {b for b, block in self._dataset.blocks.items()
                            if blocks_filter(block)}
-        activations_loader = torch.utils.data.DataLoader(
-            self._dataset.select(lambda tr: tr['block'] in training_blocks),
-            batch_size=batch_size,
-            pin_memory=True,
+        training_data = self._dataset.data().select(
+            lambda t: t['block'] in training_blocks
         )
+        activations_loader = torch.utils.data.DataLoader(training_data,
+                                                         batch_size=batch_size,
+                                                         pin_memory=True)
         decoder = self.decoder
         variational = self.variational
         generative = self.generative
@@ -189,9 +192,9 @@ class DeepTFA:
                 activations = data['activations']
                 if tfa.CUDA and use_cuda:
                     activations = activations.cuda()
-                block_batch = list(data['block'].numpy())
+                block_batch = list(set(data['block'].numpy()))
 
-                trs = (data['t'][0].item(), data['t'][-1].item())
+                trs = list(data['t'].numpy())
 
                 optimizer.zero_grad()
                 q = probtorch.Trace()
@@ -941,7 +944,8 @@ class DeepTFA:
     def common_name(self):
         if not self._common_name:
             self._common_name = os.path.commonprefix(
-                [os.path.basename(b['template']) for b in self._dataset.blocks]
+                [os.path.basename(b['template']) for b
+                 in self._dataset.blocks.values()]
             )
         return self._common_name
 
