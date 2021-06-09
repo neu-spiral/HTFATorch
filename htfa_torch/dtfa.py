@@ -46,50 +46,36 @@ EPOCH_MSG = '[Epoch %d] (%dms) Posterior free-energy %.8e = KL from prior %.8e -
 
 class DeepTFA:
     """Overall container for a run of Deep TFA"""
-    def __init__(self, query, mask, num_factors=tfa_models.NUM_FACTORS,
+    def __init__(self, data_tar, num_factors=tfa_models.NUM_FACTORS,
                  embedding_dim=2, model_time_series=True, query_name=None):
         self.num_factors = num_factors
         self._time_series = model_time_series
         self._common_name = query_name
-        self.mask = mask
-        self._blocks = list(query)
-        for block in self._blocks:
-            block.load()
-            block.unload_locations()
-        self.num_blocks = len(self._blocks)
-        self.voxel_activations = [block.activations for block in self._blocks]
-        self._blocks[-1].load()
-        if tfa.CUDA:
-            self.voxel_locations = self._blocks[-1].locations.pin_memory()
-        else:
-            self.voxel_locations = self._blocks[-1].locations
-        self._templates = [block.filename for block in self._blocks]
-        self._tasks = [block.task for block in self._blocks]
+        self._dataset = data_tar
+        self.num_blocks = len(self._dataset.blocks)
 
-        self.activation_normalizers = None
-        self.activation_sufficient_stats = None
-        self.normalize_activations()
+        self.voxel_locations = self._dataset.voxel_locations
+        if tfa.CUDA:
+            self.voxel_locations = self.voxel_locations.pin_memory()
+        self._templates = self._dataset.templates()
+        self._tasks = self._dataset.tasks()
+
+        self.activation_normalizers, self.activation_sufficient_stats =\
+            self._dataset.normalize_activations()
 
         # Pull out relevant dimensions: the number of time instants and the
         # number of voxels in each timewise "slice"
-        self.num_times = [acts.shape[0] for acts in self.voxel_activations]
+        self.num_times = [len(block['times']) for block in self._dataset.blocks]
         self.num_voxels = self.voxel_locations.shape[0]
 
         subjects = self.subjects()
         tasks = self.tasks()
-        block_subjects = [subjects.index(b.subject) for b in self._blocks]
-        block_tasks = [tasks.index(b.task) for b in self._blocks]
+        block_subjects = [subjects.index(b['subject'])
+                          for b in self._dataset.blocks]
+        block_tasks = [tasks.index(b['task']) for b in self._dataset.blocks]
 
-        b = max(range(self.num_blocks), key=lambda b: self.num_times[b])
-        init_activations = self.voxel_activations.copy()
-        max_times = max(self.num_times)
-        for i, acts in enumerate(init_activations):
-            if acts.shape[0] < max_times:
-                buffer = torch.zeros(max_times - acts.shape[0], self.num_voxels)
-                init_activations[i] = torch.cat((acts, buffer))
-        init_activations = torch.stack(init_activations)
         centers, widths, weights = utils.initial_hypermeans(
-            init_activations.mean(dim=0).numpy().T, self.voxel_locations.numpy(),
+            self._dataset.mean_block().numpy().T, self.voxel_locations.numpy(),
             num_factors
         )
         hyper_means = {
