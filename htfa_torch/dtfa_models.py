@@ -172,17 +172,14 @@ class DeepTFADecoder(nn.Module):
                              self._embedding_dim)
         origin = origin.to(params['subject']['mu'])
         if subject is not None:
-            subject_embed = self._predict_param(
-                params, 'subject', subject, None,
-                'z^P_{%d,%d}' % (subject, block), trace, False, guide
-            )
+            subject_embed = self._predict_param(params, 'subject', subject,
+                                                None, 'z^P', trace, False,
+                                                guide)
         else:
             subject_embed = origin
         if task is not None:
-            task_embed = self._predict_param(
-                params, 'task', task, None, 'z^S_{%d,%d}' % (task, block),
-                trace, False, guide
-            )
+            task_embed = self._predict_param(params, 'task', task, None, 'z^S',
+                                             trace, False, guide)
         else:
             task_embed = origin
         factor_params = self.factors_embedding(subject_embed).view(
@@ -201,8 +198,7 @@ class DeepTFADecoder(nn.Module):
 
         centers_predictions = self._predict_param(
             params, 'factor_centers', subject, centers_predictions,
-            'FactorCenters%d' % block, trace, predict=generative,
-            guide=guide,
+            'FactorCenters', trace, predict=generative, guide=guide,
         )
         if 'locations_min' in self._buffers:
             centers_predictions = utils.clamp_locations(centers_predictions,
@@ -210,44 +206,27 @@ class DeepTFADecoder(nn.Module):
                                                         self.locations_max)
         log_widths_predictions = self._predict_param(
             params, 'factor_log_widths', subject, log_widths_predictions,
-            'FactorLogWidths%d' % block, trace, predict=generative,
-            guide=guide,
+            'FactorLogWidths', trace, predict=generative, guide=guide,
         )
         weight_predictions = self._predict_param(
             params, 'weights', block, weight_predictions,
-            'Weights%d_%d-%d' % (block, times[0], times[1]), trace,
+            'Weights_%d-%d' % (times[0], times[-1]), trace,
             predict=generative or block < 0 or not self._time_series,
             guide=guide,
         )
 
         return centers_predictions, log_widths_predictions, weight_predictions
 
-    def forward(self, trace, blocks, block_subjects, block_tasks, params, times,
-                guide=None, num_particles=tfa_models.NUM_PARTICLES,
-                generative=False):
+    def forward(self, trace, blocks, subjects, tasks, params, times, guide=None,
+                num_particles=tfa_models.NUM_PARTICLES, generative=False):
         params = utils.vardict(params)
         if generative:
             for k, v in params.items():
                 params[k] = v.expand(num_particles, *v.shape)
 
-        if blocks:
-            weights = [None for b in blocks]
-            factor_centers = [None for b in blocks]
-            factor_log_widths = [None for b in blocks]
-
-            for (i, b) in enumerate(blocks):
-                subject = block_subjects[i] if b is not None else None
-                task = block_tasks[i] if b is not None else None
-
-                factor_centers[i], factor_log_widths[i], weights[i] =\
-                    self.predict(trace, params, guide, subject, task, times, b,
-                                 generative)
-        else:
-            subject = block_subjects[0] if block_subjects else None
-            task = block_tasks[0] if block_tasks else None
-            factor_centers, factor_log_widths, weights =\
-                self.predict(trace, params, guide, subject, task, times,
-                             generative=generative)
+        factor_centers, factor_log_widths, weights =\
+            self.predict(trace, params, guide, subjects, tasks, times,
+                         generative)
 
         return weights, factor_centers, factor_log_widths
 
