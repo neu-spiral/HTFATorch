@@ -57,8 +57,9 @@ class DeepTFA:
         self.voxel_locations = self._dataset.voxel_locations
         if tfa.CUDA:
             self.voxel_locations = self.voxel_locations.pin_memory()
-        self._templates = self._dataset.templates()
+        self._subjects = self._dataset.subjects()
         self._tasks = self._dataset.tasks()
+        self._templates = self._dataset.templates()
 
         self.activation_normalizers, self.activation_sufficient_stats =\
             self._dataset.normalize_activations()
@@ -192,17 +193,14 @@ class DeepTFA:
                 activations = data['activations']
                 if tfa.CUDA and use_cuda:
                     activations = activations.cuda()
-                block_batch = list(set(data['block'].numpy()))
-
-                trs = list(data['t'].numpy())
 
                 optimizer.zero_grad()
                 q = probtorch.Trace()
-                variational(decoder, q, times=trs, blocks=block_batch,
+                variational(decoder, q, times=data['t'], blocks=data['block'],
                             num_particles=num_particles)
                 p = probtorch.Trace()
-                generative(decoder, p, times=trs, guide=q,
-                           observations=activations, blocks=block_batch,
+                generative(decoder, p, times=data['t'], guide=q,
+                           observations=activations, blocks=data['block'],
                            locations=voxel_locations,
                            num_particles=num_particles)
 
@@ -354,78 +352,72 @@ class DeepTFA:
             hyperparams[k] = v.unsqueeze(0)
 
         guide = probtorch.Trace()
-        if block is not None:
-            subject = self.generative.block_subjects[block]
-            task = self.generative.block_tasks[block]
-            times = (0, self.num_times[block])
-            blocks = [block]
-            block_subjects = [self.generative.block_subjects[block]]
-            block_tasks = [self.generative.block_tasks[block]]
-        else:
-            times = (0, max(self.num_times))
-            blocks = []
-            block_subjects = self.generative.block_subjects
-            block_tasks = self.generative.block_tasks
+        if block is None:
+            block = 0
+            times = torch.arange(max(self.num_times))
+        subject = torch.tensor(
+            [self._subjects.index(self._dataset.blocks[block]['subject'])
+             for _ in times],
+            dtype=torch.long
+        )
+        task = torch.tensor(
+            [self._tasks.index(self._dataset.blocks[block]['task'])
+             for _ in times],
+            dtype=torch.long
+        )
+        block = torch.tensor([block for _ in times], dtype=torch.long)
 
-        for b in blocks:
-            if subject is not None:
-                guide.variable(
-                    torch.distributions.Normal,
-                    hyperparams['subject']['mu'][:, subject],
-                    torch.exp(hyperparams['subject']['log_sigma'][:, subject]),
-                    value=hyperparams['subject']['mu'][:, subject],
-                    name='z^P_{%d,%d}' % (subject, b),
-                )
-                factor_centers_params = hyperparams['factor_centers']
-                guide.variable(
-                    torch.distributions.Normal,
-                    factor_centers_params['mu'][:, subject],
-                    torch.exp(factor_centers_params['log_sigma'][:, subject]),
-                    value=factor_centers_params['mu'][:, subject],
-                    name='FactorCenters%d' % b,
-                )
-                factor_log_widths_params = hyperparams['factor_log_widths']
-                guide.variable(
-                    torch.distributions.Normal,
-                    factor_log_widths_params['mu'][:, subject],
-                    torch.exp(factor_log_widths_params['log_sigma'][:, subject]),
-                    value=factor_log_widths_params['mu'][:, subject],
-                    name='FactorLogWidths%d' % b,
-                )
-            if task is not None:
-                guide.variable(
-                    torch.distributions.Normal,
-                    hyperparams['task']['mu'][:, task],
-                    torch.exp(hyperparams['task']['log_sigma'][:, task]),
-                    value=hyperparams['task']['mu'][:, task],
-                    name='z^S_{%d,%d}' % (task, b),
-                )
-            if self._time_series and not generative:
-                for k, v in hyperparams['weights'].items():
-                    hyperparams['weights'][k] = v[:, :, times[0]:times[1]]
-                weights_params = hyperparams['weights']
-                guide.variable(
-                    torch.distributions.Normal,
-                    weights_params['mu'][:, b],
-                    torch.exp(weights_params['log_sigma'][:, b]),
-                    value=weights_params['mu'][:, b],
-                    name='Weights%d_%d-%d' % (b, times[0], times[1])
-                )
-
+        guide.variable(
+            torch.distributions.Normal,
+            hyperparams['subject']['mu'][:, subject],
+            torch.exp(hyperparams['subject']['log_sigma'][:, subject]),
+            value=hyperparams['subject']['mu'][:, subject],
+            name='z^P',
+        )
+        factor_centers_params = hyperparams['factor_centers']
+        guide.variable(
+            torch.distributions.Normal,
+            factor_centers_params['mu'][:, subject],
+            torch.exp(factor_centers_params['log_sigma'][:, subject]),
+            value=factor_centers_params['mu'][:, subject],
+            name='FactorCenters',
+        )
+        factor_log_widths_params = hyperparams['factor_log_widths']
+        guide.variable(
+            torch.distributions.Normal,
+            factor_log_widths_params['mu'][:, subject],
+            torch.exp(factor_log_widths_params['log_sigma'][:, subject]),
+            value=factor_log_widths_params['mu'][:, subject],
+            name='FactorLogWidths',
+        )
+        guide.variable(
+            torch.distributions.Normal,
+            hyperparams['task']['mu'][:, task],
+            torch.exp(hyperparams['task']['log_sigma'][:, task]),
+            value=hyperparams['task']['mu'][:, task],
+            name='z^S',
+        )
+        if self._time_series and not generative:
+            for k, v in hyperparams['weights'].items():
+                hyperparams['weights'][k] = v[:, :, times[0]:times[1]]
+            weights_params = hyperparams['weights']
+            guide.variable(
+                torch.distributions.Normal,
+                weights_params['mu'][:, block],
+                torch.exp(weights_params['log_sigma'][:, block]),
+                value=weights_params['mu'][:, block],
+                name='Weights_%d-%d' % (times[0], times[-1])
+            )
 
         if generative:
             for k, v in hyperparams.items():
                 hyperparams[k] = v.squeeze(0)
 
         weights, factor_centers, factor_log_widths =\
-            self.decoder(probtorch.Trace(), blocks, block_subjects, block_tasks,
+            self.decoder(probtorch.Trace(), block, subject, task,
                          hyperparams, times, guide=guide, num_particles=1,
                          generative=generative)
 
-        if block is not None:
-            weights = weights[0]
-            factor_centers = factor_centers[0]
-            factor_log_widths = factor_log_widths[0]
         weights = weights.squeeze(0)
         factor_centers = factor_centers.squeeze(0)
         factor_log_widths = factor_log_widths.squeeze(0)
