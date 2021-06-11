@@ -267,9 +267,9 @@ class DeepTFAGuide(nn.Module):
                           if b in blocks]
         block_tasks = [self.block_tasks[b] for b in range(self._num_blocks)
                        if b in blocks]
-        if times and self._time_series:
+        if times is not None and self._time_series:
             for k, v in params['weights'].items():
-                params['weights'][k] = v[:, :, times[0]:times[1], :]
+                params['weights'][k] = v[:, :, times, :]
 
         return decoder(trace, blocks, block_subjects, block_tasks, params,
                        times=times, num_particles=num_particles)
