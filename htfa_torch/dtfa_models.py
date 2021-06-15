@@ -166,8 +166,8 @@ class DeepTFADecoder(nn.Module):
                               value=utils.clamped(name, guide), name=name)
         return result
 
-    def predict(self, trace, params, guide, subject, task, times=(0, 1),
-                block=-1, generative=False):
+    def predict(self, trace, params, guide, block, subject, task, times=(0, 1),
+                generative=False):
         origin = torch.zeros(params['subject']['mu'].shape[0],
                              self._embedding_dim)
         origin = origin.to(params['subject']['mu'])
@@ -193,7 +193,7 @@ class DeepTFADecoder(nn.Module):
             -1, self._num_factors, 2
         )
         weight_predictions = weight_predictions.unsqueeze(1).expand(
-            -1, times[1]-times[0], self._num_factors, 2
+            -1, times.shape[0], self._num_factors, 2
         )
 
         centers_predictions = self._predict_param(
@@ -211,7 +211,7 @@ class DeepTFADecoder(nn.Module):
         weight_predictions = self._predict_param(
             params, 'weights', block, weight_predictions,
             'Weights_%d-%d' % (times[0], times[-1]), trace,
-            predict=generative or block < 0 or not self._time_series,
+            predict=generative or (block < 0).any() or not self._time_series,
             guide=guide,
         )
 
@@ -225,8 +225,8 @@ class DeepTFADecoder(nn.Module):
                 params[k] = v.expand(num_particles, *v.shape)
 
         factor_centers, factor_log_widths, weights =\
-            self.predict(trace, params, guide, subjects, tasks, times,
-                         generative)
+            self.predict(trace, params, guide, blocks, subjects, tasks, times,
+                         generative=generative)
 
         return weights, factor_centers, factor_log_widths
 
