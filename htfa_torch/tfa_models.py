@@ -229,22 +229,28 @@ class TFAGenerativeLikelihood(GenerativeLikelihood):
         self.block = block
 
     def forward(self, trace, weights, centers, log_widths, params, times=None,
-                observations=collections.defaultdict(), block=None,
-                locations=None):
+                observations=None, blocks=None, locations=None):
         if times is None:
-            times = (0, self._num_times)
+            times = torch.arange(self._num_times)
+        if observations is None:
+            observations = collections.defaultdict()
+        if blocks is None:
+            blocks = torch.tensor([self.block], dtype=torch.long)
+        if locations is None:
+            locations = self.voxel_locations
 
-        if locations is not None:
-            voxel_locations = locations
-        else:
-            voxel_locations = self.voxel_locations
-        factors = radial_basis(voxel_locations, centers, log_widths)
-        block = block if block is not None else self.block
-        activations = trace.normal(weights @ factors,
-                                   params['voxel_noise'][0],
+        block_ids = blocks.unique()
+        blocks = torch.cat([(block_ids == b).nonzero(as_tuple=True)[0] for b
+                            in list(blocks.cpu().numpy())], dim=0)
+
+        factors = radial_basis(locations, centers, log_widths)
+        predictions = (weights @ factors)[:, blocks,
+                                          torch.arange(times.shape[0])]
+
+        activations = trace.normal(predictions, params['voxel_noise'][0],
                                    value=observations['Y'],
-                                   name='Y%dt%d-%d' % (block, times[0],
-                                                       times[1]))
+                                   name='Y%s_%d-%d' % (block_ids, times[0],
+                                                       times[-1]))
         return activations
 
 class TFAModel(nn.Module):
