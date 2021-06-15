@@ -292,20 +292,23 @@ class DeepTFAModel(nn.Module):
             locations, self._num_times, block=None, register_locations=False
         ))
 
-    def forward(self, decoder, trace, times=None, guide=probtorch.Trace(),
-                observations=[], blocks=None, locations=None,
+    def forward(self, decoder, trace, times=None, guide=None, observations=[],
+                blocks=None, locations=None,
                 num_particles=tfa_models.NUM_PARTICLES):
         params = self.hyperparams.state_vardict()
+        if guide is None:
+            guide = probtorch.Trace()
         if times is None:
-            times = (0, max(self._num_times))
+            times = torch.arange(max(self._num_times))
         if blocks is None:
-            blocks = list(range(self._num_blocks))
+            blocks = torch.arange(self._num_blocks)
+        else:
+            tr_blocks = blocks
+            blocks = blocks.unique()
 
-        block_subjects = [self.block_subjects[b]
-                          for b in range(self._num_blocks)
-                          if b in blocks]
-        block_tasks = [self.block_tasks[b] for b in range(self._num_blocks)
-                       if b in blocks]
+        block_subjects = torch.tensor(self.block_subjects,
+                                      dtype=torch.long)[blocks]
+        block_tasks = torch.tensor(self.block_tasks, dtype=torch.long)[blocks]
 
         weights, centers, log_widths = decoder(trace, blocks, block_subjects,
                                                block_tasks, params, times,
@@ -315,4 +318,4 @@ class DeepTFAModel(nn.Module):
 
         return self.likelihood(trace, weights, centers, log_widths, params,
                                times=times, observations=observations,
-                               block=blocks, locations=locations)
+                               blocks=tr_blocks, locations=locations)
