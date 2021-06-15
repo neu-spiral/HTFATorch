@@ -191,16 +191,19 @@ class DeepTFA:
                 epoch_prior_kls[batch] = 0.0
 
                 activations = data['activations']
+                blocks = data['block']
                 if tfa.CUDA and use_cuda:
                     activations = activations.cuda()
+                    blocks = blocks.cuda()
 
                 optimizer.zero_grad()
                 q = probtorch.Trace()
-                variational(decoder, q, times=data['t'], blocks=data['block'],
+                variational(decoder, q, times=data['t'],
+                            blocks=blocks.unique(),
                             num_particles=num_particles)
                 p = probtorch.Trace()
                 generative(decoder, p, times=data['t'], guide=q,
-                           observations=activations, blocks=data['block'],
+                           observations={'Y': activations}, blocks=blocks,
                            locations=voxel_locations,
                            num_particles=num_particles)
 
@@ -223,6 +226,7 @@ class DeepTFA:
                 epoch_prior_kls[batch] += prior_kl
 
                 if tfa.CUDA and use_cuda:
+                    del blocks
                     del activations
                     torch.cuda.empty_cache()
 
@@ -355,17 +359,8 @@ class DeepTFA:
         if block is None:
             block = 0
             times = torch.arange(max(self.num_times))
-        subject = torch.tensor(
-            [self._subjects.index(self._dataset.blocks[block]['subject'])
-             for _ in times],
-            dtype=torch.long
-        )
-        task = torch.tensor(
-            [self._tasks.index(self._dataset.blocks[block]['task'])
-             for _ in times],
-            dtype=torch.long
-        )
-        block = torch.tensor([block for _ in times], dtype=torch.long)
+        subject = self._subjects.index(self._dataset.blocks[block]['subject'])
+        task = self._tasks.index(self._dataset.blocks[block]['task'])
 
         guide.variable(
             torch.distributions.Normal,
@@ -398,24 +393,25 @@ class DeepTFA:
             name='z^S',
         )
         if self._time_series and not generative:
-            for k, v in hyperparams['weights'].items():
-                hyperparams['weights'][k] = v[:, :, times[0]:times[1]]
             weights_params = hyperparams['weights']
             guide.variable(
                 torch.distributions.Normal,
                 weights_params['mu'][:, block],
-                torch.exp(weights_params['log_sigma'][:, block]),
-                value=weights_params['mu'][:, block],
+                torch.exp(weights_params['log_sigma'][:, block, times]),
+                value=weights_params['mu'][:, block, times],
                 name='Weights_%d-%d' % (times[0], times[-1])
             )
 
         if generative:
             for k, v in hyperparams.items():
                 hyperparams[k] = v.squeeze(0)
+        block = torch.tensor([block], dtype=torch.long)
+        subjects = torch.tensor([subject], dtype=torch.long)
+        tasks = torch.tensor([task], dtype=torch.long)
 
         weights, factor_centers, factor_log_widths =\
-            self.decoder(probtorch.Trace(), block, subject, task,
-                         hyperparams, times, guide=guide, num_particles=1,
+            self.decoder(probtorch.Trace(), block, subjects, tasks, hyperparams,
+                         times, guide=guide, num_particles=1,
                          generative=generative)
 
         weights = weights.squeeze(0)
@@ -427,7 +423,7 @@ class DeepTFA:
             plt.show()
 
         result = {
-            'weights': weights[times[0]:times[1]].data,
+            'weights': weights[times].data,
             'factors': tfa_models.radial_basis(self.voxel_locations,
                                                factor_centers.data,
                                                factor_log_widths.data),
@@ -438,9 +434,9 @@ class DeepTFA:
             for k, v in hyperparams.items():
                 hyperparams[k] = v.unsqueeze(0)
         if subject is not None:
-            result['z^P_%d' % subject] = hyperparams['subject']['mu'][:, subject]
+            result['z^P'] = hyperparams['subject']['mu'][:, subject]
         if task is not None:
-            result['z^S_%d' % task] = hyperparams['task']['mu'][:, task]
+            result['z^S'] = hyperparams['task']['mu'][:, task]
         return result
 
     def reconstruction(self, block=None, subject=None, task=None, t=0):
