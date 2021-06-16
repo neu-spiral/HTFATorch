@@ -80,7 +80,8 @@ class FmriTarDataset:
             result = result.batched(batch_size, _collation_fn)
         if selector:
             result = result.select(selector)
-        return result.dbcache(self._path + '.db', self._num_times)
+        return result.compose(wds.DBCache, self._path + '.db', self._num_times,
+                              verbose=False)
 
     def mean_block(self):
         num_times = max(row['t'] for row in self._dataset) + 1
