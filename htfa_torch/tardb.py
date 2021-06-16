@@ -83,6 +83,11 @@ class FmriTarDataset:
         return result.compose(wds.DBCache, self._path + '.db', self._num_times,
                               verbose=False)
 
+    def __getitem__(self, b):
+        block = self.blocks[b]
+        data = self._dataset.slice(block['times'][0], block['times'][-1] + 1)
+        return _collation_fn(data)
+
     def mean_block(self):
         num_times = max(row['t'] for row in self._dataset) + 1
         mean = torch.zeros(num_times, self.voxel_locations.shape[0])
