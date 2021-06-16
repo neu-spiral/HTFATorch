@@ -287,15 +287,11 @@ class DeepTFA:
             prior_kls = prior_kls.to(voxel_locations)
 
         for k in range(sample_size // num_particles):
-            for (batch, data) in enumerate(training_data):
-                epoch_free_energies[batch] = 0.0
-                epoch_lls[batch] = 0.0
-                epoch_prior_kls[batch] = 0.0
-
+            for (batch, data) in enumerate(testing_data):
                 if tfa.CUDA and use_cuda:
-                    for k, v in data.items():
-                        if isinstance(v, torch.Tensor):
-                            data[k] = v.cuda()
+                    for key, val in data.items():
+                        if isinstance(val, torch.Tensor):
+                            data[key] = val.cuda()
 
                 q = probtorch.Trace()
                 variational(decoder, q, times=data['t'],
@@ -447,8 +443,9 @@ class DeepTFA:
 
     def reconstruction_diff(self, block, t=0, zscore_bound=3):
         results = self.results(block)
+        activations = self._dataset[block]['activations']
         reconstruction = results['weights'] @ results['factors']
-        squared_diff = (self.voxel_activations[block] - reconstruction) ** 2
+        squared_diff = (activations - reconstruction) ** 2
 
         if zscore_bound is None:
             zscore_bound = squared_diff.max().item()
@@ -458,18 +455,17 @@ class DeepTFA:
                               self._templates[block])
         if t is None:
             image_slice = nilearn.image.mean_img(image)
-            squared_diff = self.voxel_activations[block].mean(dim=0) -\
-                           reconstruction.mean(dim=0)
+            squared_diff = activations.mean(dim=0) - reconstruction.mean(dim=0)
         else:
             image_slice = nilearn.image.index_img(image, t)
-            squared_diff = self.voxel_activations[block][t] - reconstruction[t]
+            squared_diff = activations[t] - reconstruction[t]
         squared_diff = squared_diff ** 2
 
         return image_slice, squared_diff
 
     def plot_reconstruction_diff(self, block, filename='', show=True, t=0,
-                                 plot_abs=False, labeler=lambda b: None,
-                                 zscore_bound=3, **kwargs):
+                                 labeler=lambda b: None, zscore_bound=3,
+                                 **kwargs):
         if filename == '' and t is None:
             filename = '%s-%s_ntfa_reconstruction_diff.pdf'
             filename = filename % (self.common_name(), str(block))
@@ -480,7 +476,7 @@ class DeepTFA:
         image_slice, diff = self.reconstruction_diff(block, t=t,
                                                      zscore_bound=zscore_bound)
         plot = niplot.plot_glass_brain(
-            image_slice, plot_abs=plot_abs, colorbar=True, symmetric_cbar=False,
+            image_slice, plot_abs=True, colorbar=True, symmetric_cbar=False,
             title=utils.title_brain_plot(block, self._dataset.blocks[block],
                                          labeler, t, 'Squared Residual'),
             vmin=0, vmax=zscore_bound ** 2, **kwargs,
@@ -489,7 +485,7 @@ class DeepTFA:
         logging.info(
             'Reconstruction Error (Frobenius Norm): %.8e out of %.8e',
             np.linalg.norm(diff.sqrt().numpy()),
-            np.linalg.norm(self.voxel_activations[block].numpy())
+            np.linalg.norm(self._dataset[block]['activations'].numpy())
         )
 
         if filename is not None:
@@ -551,10 +547,8 @@ class DeepTFA:
             labeler = lambda b: None
         if block is None:
             block = np.random.choice(self.num_blocks, 1)[0]
-        if self.activation_normalizers is None:
-            self.normalize_activations()
 
-        image = utils.cmu2nii(self.voxel_activations[block].numpy(),
+        image = utils.cmu2nii(self._dataset[block]['activations'].numpy(),
                               self.voxel_locations.numpy(),
                               self._templates[block])
         if t is None:
@@ -577,19 +571,18 @@ class DeepTFA:
 
     def average_reconstruction_error(self, weighted=True,
                                      blocks_filter=lambda block: True):
-        if self.activation_normalizers is None:
-            self.normalize_activations()
         blocks = [block for block in range(self.num_blocks)
-                  if blocks_filter(self._blocks[block])]
+                  if blocks_filter(self._dataset.blocks[block])]
+
 
         if weighted:
             return utils.average_weighted_reconstruction_error(
                 blocks, self.num_times, self.num_voxels,
-                self.voxel_activations, self.results
+                self._dataset, self.results
             )
         else:
             return utils.average_reconstruction_error(
-                blocks, self.voxel_activations, self.results
+                blocks, self._dataset, self.results
             )
 
     def plot_reconstruction(self, block=None, filename='', show=True,
@@ -607,8 +600,6 @@ class DeepTFA:
             labeler = lambda b: None
         if block is None:
             block = np.random.choice(self.num_blocks, 1)[0]
-        if self.activation_normalizers is None:
-            self.normalize_activations()
 
         image_slice, reconstruction = self.reconstruction(block=block, t=t)
         plot = niplot.plot_glass_brain(
@@ -618,7 +609,7 @@ class DeepTFA:
             vmin=-zscore_bound, vmax=zscore_bound, **kwargs,
         )
 
-        activations = self.voxel_activations[block]
+        activations = self._dataset[block]['activations']
         if t:
             activations = activations[t]
         else:
@@ -627,7 +618,7 @@ class DeepTFA:
         logging.info(
             'Reconstruction Error (Frobenius Norm): %.8e out of %.8e',
             np.linalg.norm((activations - reconstruction).numpy()),
-            np.linalg.norm(self.voxel_activations[block].numpy())
+            np.linalg.norm(activations.numpy())
         )
 
         if filename is not None:
@@ -645,8 +636,8 @@ class DeepTFA:
                        '_subject_template.pdf'
         i = self.subjects().index(subject)
         results = self.results(block=None, task=None, subject=i)
-        template = [i for (i, b) in enumerate(self._blocks)
-                    if b.subject == subject][0]
+        template = [i for (i, b) in enumerate(self._dataset.blocks.values())
+                    if b['subject'] == subject][0]
         reconstruction = results['weights'] @ results['factors']
         if zscore_bound is None:
             zscore_bound = self.activation_normalizers[template]
@@ -687,8 +678,8 @@ class DeepTFA:
                        '_task_template.pdf'
         i = self.tasks().index(task)
         results = self.results(block=None, subject=None, task=i)
-        template = [i for (i, b) in enumerate(self._blocks)
-                    if b.task == task][0]
+        template = [i for (i, b) in enumerate(self._dataset.blocks.values())
+                    if b['task'] == task][0]
         reconstruction = results['weights'] @ results['factors']
         if zscore_bound is None:
             zscore_bound = self.activation_normalizers[template]
@@ -965,14 +956,14 @@ class DeepTFA:
         """
         :return: accuracy: a dict containing decoding accuracies for each task [activity,isfc,mixed]
         """
-        tasks = np.unique([labeler(b.task) for b in self._blocks])
+        tasks = np.unique([labeler(b.task) for b in self._dataset.blocks])
         group = {task: [] for task in tasks}
         accuracy = {task: {'node': [], 'isfc': [], 'mixed': [], 'kl': []}
                     for task in tasks}
 
-        for (b, block) in enumerate(self._blocks):
+        for (b, block) in self._dataset.blocks.items():
             factorization = self.results(b)
-            group[(block.task)].append(factorization['weights'])
+            group[(block['task'])].append(factorization['weights'])
 
         for task in set(tasks):
             print(task)
@@ -1002,15 +993,14 @@ class DeepTFA:
 
     def voxel_decoding_accuracy(self, labeler=lambda x: x, window_size=60):
         times = self.num_times
-        keys = np.unique([labeler(b.task) for b in self._blocks])
+        keys = np.unique([labeler(b.task) for b in self._dataset.blocks])
         group = {key: [] for key in keys}
         accuracy = {key: [] for key in keys}
         for key in keys:
             print(key)
             for n in range(self.num_blocks):
-                if key == self._blocks[n].task:
-                    self._blocks[n].load()
-                    group[key].append(self._blocks[n].activations[:times[n], :])
+                if key == self._dataset.blocks[n]['task']:
+                    group[key].append(self._dataset[n]['activations'][:times[n], :])
             group[key] = np.rollaxis(np.dstack(group[key]), -1)
             if group[key].shape[0] < 2:
                 raise ValueError('not enough subjects for the task: ' + key)
