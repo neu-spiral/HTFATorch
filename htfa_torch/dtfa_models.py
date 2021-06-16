@@ -307,9 +307,10 @@ class DeepTFAModel(nn.Module):
             tr_blocks = blocks
             blocks = blocks.unique()
 
-        block_subjects = torch.tensor(self.block_subjects,
-                                      dtype=torch.long)[blocks]
-        block_tasks = torch.tensor(self.block_tasks, dtype=torch.long)[blocks]
+        block_subjects = torch.tensor(self.block_subjects, dtype=torch.long,
+                                      device=blocks.device)[blocks]
+        block_tasks = torch.tensor(self.block_tasks, dtype=torch.long,
+                                   device=blocks.device)[blocks]
 
         weights, centers, log_widths = decoder(trace, blocks, block_subjects,
                                                block_tasks, params, times,
