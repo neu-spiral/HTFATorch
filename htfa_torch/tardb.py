@@ -6,28 +6,36 @@ __author__ = ('Jan-Willem van de Meent',
 __email__ = ('j.vandemeent@northeastern.edu',
              'sennesh.e@husky.neu.edu',
              'khan.zu@husky.neu.edu')
-from functools import lru_cache
-import json
-import logging
-import os
-import types
-
 import torch
 import torch.utils.data
 import webdataset as wds
 
-from . import utils
+def _collation_fn(samples):
+    result = {'__key__': [], 'activations': [], 't': [], 'block': []}
+    for sample in samples:
+        for k, v in sample.items():
+            result[k].append(v)
 
-def _densify(tr):
-    tr['activations'] = tr['activations'].to_dense()
-    return tr
+    result['activations'] = torch.stack(result['activations'], dim=0)
+    result['t'] = torch.tensor(result['t'], dtype=torch.long)
+    result['block'] = torch.tensor(result['block'], dtype=torch.long)
+
+    return result
 
 class FmriTarDataset:
     def __init__(self, path):
         metadata = torch.load(path + '.meta')
+        self._path = path
+        self._num_times = metadata['num_times']
 
-        self._dataset = wds.WebDataset(path, length=metadata['num_times']).\
-                        decode()
+        self._dataset = wds.WebDataset(path, length=self._num_times)
+        self._dataset = self._dataset.decode().rename(
+            activations='pth', t='time.index', block='block.id',
+            __key__='__key__'
+        )
+        self._dataset = self._dataset.map_dict(
+            activations=lambda acts: acts.to_dense()
+        )
         self.voxel_locations = metadata['voxel_locations']
 
         self._blocks = {}
@@ -41,7 +49,7 @@ class FmriTarDataset:
                 'times': []
             }
         for tr in self._dataset:
-            self.blocks[tr['block.id']]['times'].append(tr['time.index'])
+            self.blocks[tr['block']]['times'].append(tr['t'])
 
     def _unique_properties(self, key_func, data=None):
         if data is None:
@@ -66,28 +74,29 @@ class FmriTarDataset:
     def blocks(self):
         return self._blocks
 
-    def data(self):
-        return self._dataset.rename(
-            activations='pth', t='time.index', block='block.id',
-            __key__='__key__'
-        ).map(_densify)
+    def data(self, batch_size=None, selector=None):
+        result = self._dataset
+        if batch_size:
+            result = result.batched(batch_size, _collation_fn)
+        if selector:
+            result = result.select(selector)
+        return result.dbcache(self._path + '.db', self._num_times)
 
     def mean_block(self):
-        num_times = max(row['time.index'] for row in self._dataset) + 1
+        num_times = max(row['t'] for row in self._dataset) + 1
         mean = torch.zeros(num_times, self.voxel_locations.shape[0])
         for tr in self._dataset:
-            mean[tr['time.index']] += tr['pth'].to_dense()
+            mean[tr['t']] += tr['activations']
         return mean / len(self.blocks)
 
     def normalize_activations(self):
         subject_runs = self.subject_runs()
-        run_activations = {(subject, run): [tr['pth'] for tr in self._dataset
-                                            if self.blocks[tr['block.id']]['run'] == run and\
-                                            self.blocks[tr['block.id']]['subject'] == subject]
+        run_activations = {(subject, run): [tr['activations'] for tr in self._dataset
+                                            if self.blocks[tr['block']]['run'] == run and\
+                                            self.blocks[tr['block']]['subject'] == subject]
                            for subject, run in subject_runs}
         for sr, acts in run_activations.items():
-            run_activations[sr] = torch.stack([act.to_dense() for act in acts],
-                                              dim=0).flatten()
+            run_activations[sr] = torch.stack(acts, dim=0).flatten()
 
         normalizers = []
         sufficient_stats = []
