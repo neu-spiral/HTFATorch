@@ -262,9 +262,10 @@ class DeepTFAGuide(nn.Module):
         if blocks is None:
             blocks = torch.arange(self._num_blocks)
 
-        block_subjects = torch.tensor(self.block_subjects,
-                                      dtype=torch.long)[blocks]
-        block_tasks = torch.tensor(self.block_tasks, dtype=torch.long)[blocks]
+        block_subjects = torch.tensor(self.block_subjects, dtype=torch.long,
+                                      device=blocks.device)[blocks]
+        block_tasks = torch.tensor(self.block_tasks, dtype=torch.long,
+                                   device=blocks.device)[blocks]
         if times is not None and self._time_series:
             for k, v in params['weights'].items():
                 params['weights'][k] = v[:, :, times, :]
