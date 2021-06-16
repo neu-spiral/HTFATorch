@@ -123,14 +123,10 @@ class DeepTFA:
                             datefmt='%m/%d/%Y %H:%M:%S',
                             level=log_level)
         # S x T x V -> T x S x V
-        training_blocks = {b for b, block in self._dataset.blocks.items()
-                           if blocks_filter(block)}
-        training_data = self._dataset.data().select(
-            lambda t: t['block'] in training_blocks
+        training_data = torch.utils.data.DataLoader(
+            self._dataset.data(selector=blocks_filter), batch_size=batch_size,
+            pin_memory=True
         )
-        activations_loader = torch.utils.data.DataLoader(training_data,
-                                                         batch_size=batch_size,
-                                                         pin_memory=True)
         decoder = self.decoder
         variational = self.variational
         generative = self.generative
@@ -181,30 +177,32 @@ class DeepTFA:
 
         for epoch in range(num_steps):
             start = time.time()
-            epoch_free_energies = list(range(len(activations_loader)))
-            epoch_lls = list(range(len(activations_loader)))
-            epoch_prior_kls = list(range(len(activations_loader)))
+            epoch_free_energies = torch.zeros(len(training_data),
+                                              device=voxel_locations.device)
+            epoch_lls = torch.zeros(len(training_data),
+                                    device=voxel_locations.device)
+            epoch_prior_kls = torch.zeros(len(training_data),
+                                          device=voxel_locations.device)
 
-            for (batch, data) in enumerate(activations_loader):
+            for (batch, data) in enumerate(training_data):
                 epoch_free_energies[batch] = 0.0
                 epoch_lls[batch] = 0.0
                 epoch_prior_kls[batch] = 0.0
 
-                activations = data['activations']
-                blocks = data['block']
                 if tfa.CUDA and use_cuda:
-                    activations = activations.cuda()
-                    blocks = blocks.cuda()
+                    for k, v in data.items():
+                        if isinstance(v, torch.Tensor):
+                            data[k] = v.cuda()
 
                 optimizer.zero_grad()
                 q = probtorch.Trace()
                 variational(decoder, q, times=data['t'],
-                            blocks=blocks.unique(),
+                            blocks=data['block'].unique(),
                             num_particles=num_particles)
                 p = probtorch.Trace()
                 generative(decoder, p, times=data['t'], guide=q,
-                           observations={'Y': activations}, blocks=blocks,
-                           locations=voxel_locations,
+                           observations={'Y': data['activations']},
+                           blocks=data['block'], locations=voxel_locations,
                            num_particles=num_particles)
 
                 def block_rv_weight(node, prior=True):
@@ -221,23 +219,19 @@ class DeepTFA:
 
                 free_energy.backward()
                 optimizer.step()
-                epoch_free_energies[batch] += free_energy
-                epoch_lls[batch] += ll
-                epoch_prior_kls[batch] += prior_kl
+                epoch_free_energies[batch] += free_energy.item()
+                epoch_lls[batch] += ll.item()
+                epoch_prior_kls[batch] += prior_kl.item()
 
                 if tfa.CUDA and use_cuda:
-                    del blocks
-                    del activations
+                    for k, v in data.items():
+                        if isinstance(v, torch.Tensor):
+                            data[k] = v.cpu()
                     torch.cuda.empty_cache()
 
-                if tfa.CUDA and use_cuda:
-                    epoch_free_energies[batch] = epoch_free_energies[batch].cpu().data.numpy()
-                    epoch_lls[batch] = epoch_lls[batch].cpu().data.numpy()
-                    epoch_prior_kls[batch] = epoch_prior_kls[batch].cpu().data.numpy()
-                else:
-                    epoch_free_energies[batch] = epoch_free_energies[batch].data.numpy()
-                    epoch_lls[batch] = epoch_lls[batch].data.numpy()
-                    epoch_prior_kls[batch] = epoch_prior_kls[batch].data.numpy()
+            epoch_free_energies = epoch_free_energies.cpu().numpy()
+            epoch_lls = epoch_lls.cpu().numpy()
+            epoch_prior_kls = epoch_prior_kls.cpu().numpy()
 
             free_energies[epoch] = np.array(epoch_free_energies).mean(0)
             scheduler.step(free_energies[epoch])
