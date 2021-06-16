@@ -60,11 +60,11 @@ def average_reconstruction_error(blocks, activations, reconstruct):
 
     for b, block in enumerate(blocks):
         results = reconstruct(block)
+        image = activations[block]['activations']
         reconstruction = results['weights'] @ results['factors']
 
-        reconstruction_error[b] = np.linalg.norm(reconstruction -\
-                                                 activations[block])
-        image_norm[b] = np.linalg.norm(activations[block])
+        reconstruction_error[b] = np.linalg.norm(reconstruction - image)
+        image_norm[b] = np.linalg.norm(image)
     normed_error = reconstruction_error / image_norm
 
     logging.info('Average reconstruction error (MSE): %.8e +/- %.8e',
@@ -87,14 +87,11 @@ def average_weighted_reconstruction_error(blocks, num_times, num_voxels,
     for b, block in enumerate(blocks):
         results = reconstruct(block)
         reconstruction = results['weights'] @ results['factors']
+        image = activations[block]['activations']
 
         for t in range(results['weights'].shape[0]):
-            diff = np.linalg.norm(
-                reconstruction[t] - activations[block][t]
-            ) ** 2
-            normalizer = np.linalg.norm(
-                activations[block][t]
-            ) ** 2
+            diff = np.linalg.norm(reconstruction[t] - image[t]) ** 2
+            normalizer = np.linalg.norm(image[t]) ** 2
 
             reconstruction_error[b] += diff
             image_norm[b] += normalizer
