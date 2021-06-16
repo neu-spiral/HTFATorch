@@ -244,8 +244,8 @@ class TFAGenerativeLikelihood(GenerativeLikelihood):
                             in list(blocks.cpu().numpy())], dim=0)
 
         factors = radial_basis(locations, centers, log_widths)
-        predictions = (weights @ factors)[:, blocks,
-                                          torch.arange(times.shape[0])]
+        time_indices = torch.arange(times.shape[0], device=factors.device)
+        predictions = (weights @ factors)[:, blocks, time_indices]
 
         activations = trace.normal(predictions, params['voxel_noise'][0],
                                    value=observations['Y'],
