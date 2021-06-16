@@ -264,16 +264,12 @@ class DeepTFA:
     def free_energy(self, batch_size=64, use_cuda=True, blocks_batch_size=4,
                     blocks_filter=lambda block: True, num_particles=1,
                     sample_size=10, predictive=False):
-        testing_blocks = [(b, block) for (b, block) in enumerate(self._blocks)
-                          if blocks_filter(block)]
-        activations_loader = torch.utils.data.DataLoader(
-            utils.TFADataset([block.activations.detach()
-                              for (_, block) in testing_blocks]),
-            batch_size=batch_size,
-            pin_memory=True,
+        testing_data = torch.utils.data.DataLoader(
+            self._dataset.data(selector=blocks_filter), batch_size=batch_size,
+            pin_memory=True
         )
-        log_likelihoods = torch.zeros(sample_size, len(activations_loader))
-        prior_kls = torch.zeros(sample_size, len(activations_loader))
+        log_likelihoods = torch.zeros(sample_size, len(testing_data))
+        prior_kls = torch.zeros(sample_size, len(testing_data))
 
         self.decoder.eval()
         self.variational.eval()
@@ -291,39 +287,40 @@ class DeepTFA:
             prior_kls = prior_kls.to(voxel_locations)
 
         for k in range(sample_size // num_particles):
-            for (batch, data) in enumerate(activations_loader):
-                block_batches = utils.chunks(list(range(len(testing_blocks))),
-                                             n=blocks_batch_size)
-                for block_batch in block_batches:
-                    activations = [{'Y': data[:, b, :]} for b in block_batch]
-                    block_batch = [testing_blocks[b][0] for b in block_batch]
-                    if tfa.CUDA and use_cuda:
-                        for acts in activations:
-                            acts['Y'] = acts['Y'].cuda()
-                    trs = (batch * batch_size, None)
-                    trs = (trs[0], trs[0] + activations[0]['Y'].shape[0])
+            for (batch, data) in enumerate(training_data):
+                epoch_free_energies[batch] = 0.0
+                epoch_lls[batch] = 0.0
+                epoch_prior_kls[batch] = 0.0
 
-                    q = probtorch.Trace()
-                    variational(decoder, q, times=trs, blocks=block_batch,
-                                num_particles=num_particles)
-                    p = probtorch.Trace()
-                    generative(decoder, p, times=trs, guide=q,
-                               observations=activations, blocks=block_batch,
-                               locations=voxel_locations,
-                               num_particles=num_particles)
+                if tfa.CUDA and use_cuda:
+                    for k, v in data.items():
+                        if isinstance(v, torch.Tensor):
+                            data[k] = v.cuda()
 
-                    _, ll, prior_kl = tfa.hierarchical_free_energy(
-                        q, p, num_particles=num_particles
-                    )
+                q = probtorch.Trace()
+                variational(decoder, q, times=data['t'],
+                            blocks=data['block'].unique(),
+                            num_particles=num_particles)
+                p = probtorch.Trace()
+                generative(decoder, p, times=data['t'], guide=q,
+                           observations={'Y': data['activations']},
+                           blocks=data['block'], locations=voxel_locations,
+                           num_particles=num_particles)
 
-                    start = k * num_particles
-                    end = (k + 1) * num_particles
-                    log_likelihoods[start:end, batch] += ll.detach()
-                    prior_kls[start:end, batch] += prior_kl.detach()
+                _, ll, prior_kl = tfa.hierarchical_free_energy(
+                    q, p, num_particles=num_particles
+                )
 
-                    if tfa.CUDA and use_cuda:
-                        del activations
-                        torch.cuda.empty_cache()
+                start = k * num_particles
+                end = (k + 1) * num_particles
+                log_likelihoods[start:end, batch] += ll.detach()
+                prior_kls[start:end, batch] += prior_kl.detach()
+
+                if tfa.CUDA and use_cuda:
+                    for key, val in data.items():
+                        if isinstance(val, torch.Tensor):
+                            data[key] = val.cpu()
+                    torch.cuda.empty_cache()
 
         if tfa.CUDA and use_cuda:
             decoder.cpu()
@@ -352,7 +349,7 @@ class DeepTFA:
         guide = probtorch.Trace()
         if block is None:
             block = 0
-            times = torch.arange(max(self.num_times))
+        times = torch.arange(max(self.num_times))
         subject = self._subjects.index(self._dataset.blocks[block]['subject'])
         task = self._tasks.index(self._dataset.blocks[block]['task'])
 
@@ -484,8 +481,8 @@ class DeepTFA:
                                                      zscore_bound=zscore_bound)
         plot = niplot.plot_glass_brain(
             image_slice, plot_abs=plot_abs, colorbar=True, symmetric_cbar=False,
-            title=utils.title_brain_plot(block, self._blocks[block], labeler, t,
-                                         'Squared Residual'),
+            title=utils.title_brain_plot(block, self._dataset.blocks[block],
+                                         labeler, t, 'Squared Residual'),
             vmin=0, vmax=zscore_bound ** 2, **kwargs,
         )
 
@@ -528,8 +525,8 @@ class DeepTFA:
             np.eye(self.num_factors * 2),
             np.vstack([centers, centers]),
             node_size=np.vstack([sizes, centers_sizes]),
-            title=utils.title_brain_plot(block, self._blocks[block], labeler,
-                                         None, 'Factor Centers'),
+            title=utils.title_brain_plot(block, self._dataset.blocks[block],
+                                         labeler, None, 'Factor Centers'),
         )
 
         if filename is not None:
@@ -566,7 +563,8 @@ class DeepTFA:
             image_slice = nilearn.image.index_img(image, t)
         plot = niplot.plot_glass_brain(
             image_slice, plot_abs=plot_abs, colorbar=True, symmetric_cbar=True,
-            title=utils.title_brain_plot(block, self._blocks[block], labeler, t),
+            title=utils.title_brain_plot(block, self._dataset.blocks[block],
+                                         labeler, t),
             vmin=-zscore_bound, vmax=zscore_bound, **kwargs,
         )
 
@@ -615,8 +613,8 @@ class DeepTFA:
         image_slice, reconstruction = self.reconstruction(block=block, t=t)
         plot = niplot.plot_glass_brain(
             image_slice, plot_abs=plot_abs, colorbar=True, symmetric_cbar=True,
-            title=utils.title_brain_plot(block, self._blocks[block], labeler, t,
-                                         'NeuralTFA'),
+            title=utils.title_brain_plot(block, self._dataset.blocks[block],
+                                         labeler, t, 'NeuralTFA'),
             vmin=-zscore_bound, vmax=zscore_bound, **kwargs,
         )
 
