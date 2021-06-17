@@ -156,9 +156,8 @@ class DeepTFADecoder(nn.Module):
                 log_sigma = log_sigma.mean(dim=1)
             else:
                 if isinstance(index, tuple):
-                    for i in index:
-                        mu = mu.select(1, i)
-                        log_sigma = log_sigma.select(1, i)
+                    mu = mu[:, index[0], index[1]]
+                    log_sigma = log_sigma[:, index[0], index[1]]
                 else:
                     mu = mu[:, index]
                     log_sigma = log_sigma[:, index]
@@ -166,9 +165,9 @@ class DeepTFADecoder(nn.Module):
                               value=utils.clamped(name, guide), name=name)
         return result
 
-    def predict(self, trace, params, guide, block, subject, task, times=(0, 1),
+    def predict(self, trace, params, guide, blocks, subject, task, times=(0, 1),
                 generative=False):
-        origin = torch.zeros(params['subject']['mu'].shape[0],
+        origin = torch.zeros(params['subject']['mu'].shape[0], len(blocks),
                              self._embedding_dim)
         origin = origin.to(params['subject']['mu'])
         if subject is not None:
@@ -190,10 +189,11 @@ class DeepTFADecoder(nn.Module):
 
         joint_embed = torch.cat((subject_embed, task_embed), dim=-1)
         weight_predictions = self.weights_embedding(joint_embed).view(
-            -1, self._num_factors, 2
+            joint_embed.shape[0], joint_embed.shape[1], self._num_factors, 2
         )
-        weight_predictions = weight_predictions.unsqueeze(1).expand(
-            -1, times.shape[0], self._num_factors, 2
+        weight_predictions = weight_predictions.unsqueeze(2).expand(
+            joint_embed.shape[0], joint_embed.shape[1], len(times),
+            self._num_factors, 2
         )
 
         centers_predictions = self._predict_param(
@@ -209,9 +209,9 @@ class DeepTFADecoder(nn.Module):
             'FactorLogWidths', trace, predict=generative, guide=guide,
         )
         weight_predictions = self._predict_param(
-            params, 'weights', block, weight_predictions,
+            params, 'weights', (blocks, times), weight_predictions,
             'Weights_%d-%d' % (times[0], times[-1]), trace,
-            predict=generative or (block < 0).any() or not self._time_series,
+            predict=generative or (blocks < 0).any() or not self._time_series,
             guide=guide,
         )
 
