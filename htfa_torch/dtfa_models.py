@@ -263,12 +263,9 @@ class DeepTFAGuide(nn.Module):
             blocks = torch.arange(self._num_blocks)
 
         block_subjects = torch.tensor(self.block_subjects, dtype=torch.long,
-                                      device=blocks.device)[blocks]
+                                      device=blocks.device)[blocks.unique()]
         block_tasks = torch.tensor(self.block_tasks, dtype=torch.long,
-                                   device=blocks.device)[blocks]
-        if times is not None and self._time_series:
-            for k, v in params['weights'].items():
-                params['weights'][k] = v[:, :, times, :]
+                                   device=blocks.device)[blocks.unique()]
 
         return decoder(trace, blocks, block_subjects, block_tasks, params,
                        times=times, num_particles=num_particles)
