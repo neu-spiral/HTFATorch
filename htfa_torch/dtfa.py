@@ -455,15 +455,14 @@ class DeepTFA:
                               self._templates[block])
         if t is None:
             image_slice = nilearn.image.mean_img(image)
-            squared_diff = activations.mean(dim=0) - reconstruction.mean(dim=0)
+            squared_diff = squared_diff.mean(dim=0)
         else:
             image_slice = nilearn.image.index_img(image, t)
-            squared_diff = activations[t] - reconstruction[t]
-        squared_diff = squared_diff ** 2
+            squared_diff = squared_diff[t]
 
         return image_slice, squared_diff
 
-    def plot_reconstruction_diff(self, block, filename='', show=True, t=0,
+    def plot_reconstruction_diff(self, block=0, filename='', show=True, t=0,
                                  labeler=lambda b: None, zscore_bound=3,
                                  **kwargs):
         if filename == '' and t is None:
@@ -482,10 +481,15 @@ class DeepTFA:
             vmin=0, vmax=zscore_bound ** 2, **kwargs,
         )
 
+        if t is None:
+            activations = self._dataset[block]['activations'].mean(dim=0)
+        else:
+            activations = self._dataset[block]['activations'][t]
+
         logging.info(
             'Reconstruction Error (Frobenius Norm): %.8e out of %.8e',
             np.linalg.norm(diff.sqrt().numpy()),
-            np.linalg.norm(self._dataset[block]['activations'].numpy())
+            np.linalg.norm(activations.numpy())
         )
 
         if filename is not None:
@@ -585,7 +589,7 @@ class DeepTFA:
                 blocks, self._dataset, self.results
             )
 
-    def plot_reconstruction(self, block=None, filename='', show=True,
+    def plot_reconstruction(self, block=0, filename='', show=True,
                             plot_abs=False, t=0, labeler=None, zscore_bound=3,
                             **kwargs):
         if zscore_bound is None:
@@ -598,8 +602,6 @@ class DeepTFA:
             filename = filename % (self.common_name(), str(block), t)
         if labeler is None:
             labeler = lambda b: None
-        if block is None:
-            block = np.random.choice(self.num_blocks, 1)[0]
 
         image_slice, reconstruction = self.reconstruction(block=block, t=t)
         plot = niplot.plot_glass_brain(
@@ -610,10 +612,10 @@ class DeepTFA:
         )
 
         activations = self._dataset[block]['activations']
-        if t:
-            activations = activations[t]
-        else:
+        if t is None:
             activations = activations.mean(dim=0)
+        else:
+            activations = activations[t]
 
         logging.info(
             'Reconstruction Error (Frobenius Norm): %.8e out of %.8e',
