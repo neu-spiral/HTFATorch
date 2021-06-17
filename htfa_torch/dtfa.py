@@ -193,11 +193,12 @@ class DeepTFA:
                     for k, v in data.items():
                         if isinstance(v, torch.Tensor):
                             data[k] = v.cuda()
+                data['activations'] = data['activations'].expand(num_particles,
+                                                                 -1, -1)
 
                 optimizer.zero_grad()
                 q = probtorch.Trace()
-                variational(decoder, q, times=data['t'],
-                            blocks=data['block'].unique(),
+                variational(decoder, q, times=data['t'], blocks=data['block'],
                             num_particles=num_particles)
                 p = probtorch.Trace()
                 generative(decoder, p, times=data['t'], guide=q,
@@ -294,8 +295,7 @@ class DeepTFA:
                             data[key] = val.cuda()
 
                 q = probtorch.Trace()
-                variational(decoder, q, times=data['t'],
-                            blocks=data['block'].unique(),
+                variational(decoder, q, times=data['t'], blocks=data['block'],
                             num_particles=num_particles)
                 p = probtorch.Trace()
                 generative(decoder, p, times=data['t'], guide=q,
@@ -349,34 +349,38 @@ class DeepTFA:
         subject = self._subjects.index(self._dataset.blocks[block]['subject'])
         task = self._tasks.index(self._dataset.blocks[block]['task'])
 
+        block = torch.tensor([block] * len(times), dtype=torch.long)
+        subjects = torch.tensor([subject], dtype=torch.long)
+        tasks = torch.tensor([task], dtype=torch.long)
+
         guide.variable(
             torch.distributions.Normal,
-            hyperparams['subject']['mu'][:, subject],
-            torch.exp(hyperparams['subject']['log_sigma'][:, subject]),
-            value=hyperparams['subject']['mu'][:, subject],
+            hyperparams['subject']['mu'][:, subjects],
+            torch.exp(hyperparams['subject']['log_sigma'][:, subjects]),
+            value=hyperparams['subject']['mu'][:, subjects],
             name='z^P',
         )
         factor_centers_params = hyperparams['factor_centers']
         guide.variable(
             torch.distributions.Normal,
-            factor_centers_params['mu'][:, subject],
-            torch.exp(factor_centers_params['log_sigma'][:, subject]),
-            value=factor_centers_params['mu'][:, subject],
+            factor_centers_params['mu'][:, subjects],
+            torch.exp(factor_centers_params['log_sigma'][:, subjects]),
+            value=factor_centers_params['mu'][:, subjects],
             name='FactorCenters',
         )
         factor_log_widths_params = hyperparams['factor_log_widths']
         guide.variable(
             torch.distributions.Normal,
-            factor_log_widths_params['mu'][:, subject],
-            torch.exp(factor_log_widths_params['log_sigma'][:, subject]),
-            value=factor_log_widths_params['mu'][:, subject],
+            factor_log_widths_params['mu'][:, subjects],
+            torch.exp(factor_log_widths_params['log_sigma'][:, subjects]),
+            value=factor_log_widths_params['mu'][:, subjects],
             name='FactorLogWidths',
         )
         guide.variable(
             torch.distributions.Normal,
-            hyperparams['task']['mu'][:, task],
-            torch.exp(hyperparams['task']['log_sigma'][:, task]),
-            value=hyperparams['task']['mu'][:, task],
+            hyperparams['task']['mu'][:, tasks],
+            torch.exp(hyperparams['task']['log_sigma'][:, tasks]),
+            value=hyperparams['task']['mu'][:, tasks],
             name='z^S',
         )
         if self._time_series and not generative:
@@ -392,9 +396,6 @@ class DeepTFA:
         if generative:
             for k, v in hyperparams.items():
                 hyperparams[k] = v.squeeze(0)
-        block = torch.tensor([block], dtype=torch.long)
-        subjects = torch.tensor([subject], dtype=torch.long)
-        tasks = torch.tensor([task], dtype=torch.long)
 
         weights, factor_centers, factor_log_widths =\
             self.decoder(probtorch.Trace(), block, subjects, tasks, hyperparams,
