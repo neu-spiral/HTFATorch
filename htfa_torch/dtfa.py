@@ -499,8 +499,8 @@ class DeepTFA:
 
         return plot
 
-    def plot_factor_centers(self, block, filename='', show=True, t=None,
-                            labeler=None, serialize_data=True):
+    def plot_factor_centers(self, block, filename='', show=True, labeler=None,
+                            serialize_data=True):
         if filename == '':
             filename = self.common_name() + '-' + str(block) +\
                        '_factor_centers.pdf'
