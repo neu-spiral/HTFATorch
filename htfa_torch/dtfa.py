@@ -383,7 +383,7 @@ class DeepTFA:
             weights_params = hyperparams['weights']
             guide.variable(
                 torch.distributions.Normal,
-                weights_params['mu'][:, block],
+                weights_params['mu'][:, block, times],
                 torch.exp(weights_params['log_sigma'][:, block, times]),
                 value=weights_params['mu'][:, block, times],
                 name='Weights_%d-%d' % (times[0], times[-1])
