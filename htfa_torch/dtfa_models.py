@@ -300,14 +300,11 @@ class DeepTFAModel(nn.Module):
             times = torch.arange(max(self._num_times))
         if blocks is None:
             blocks = torch.arange(self._num_blocks)
-        else:
-            tr_blocks = blocks
-            blocks = blocks.unique()
 
         block_subjects = torch.tensor(self.block_subjects, dtype=torch.long,
-                                      device=blocks.device)[blocks]
+                                      device=blocks.device)[blocks.unique()]
         block_tasks = torch.tensor(self.block_tasks, dtype=torch.long,
-                                   device=blocks.device)[blocks]
+                                   device=blocks.device)[blocks.unique()]
 
         weights, centers, log_widths = decoder(trace, blocks, block_subjects,
                                                block_tasks, params, times,
@@ -317,4 +314,4 @@ class DeepTFAModel(nn.Module):
 
         return self.likelihood(trace, weights, centers, log_widths, params,
                                times=times, observations=observations,
-                               blocks=tr_blocks, locations=locations)
+                               blocks=blocks, locations=locations)
