@@ -349,7 +349,7 @@ class DeepTFA:
         subject = self._subjects.index(self._dataset.blocks[block]['subject'])
         task = self._tasks.index(self._dataset.blocks[block]['task'])
 
-        block = torch.tensor([block] * len(times), dtype=torch.long)
+        blocks = torch.tensor([block] * len(times), dtype=torch.long)
         subjects = torch.tensor([subject], dtype=torch.long)
         tasks = torch.tensor([task], dtype=torch.long)
 
@@ -387,9 +387,9 @@ class DeepTFA:
             weights_params = hyperparams['weights']
             guide.variable(
                 torch.distributions.Normal,
-                weights_params['mu'][:, block, times],
-                torch.exp(weights_params['log_sigma'][:, block, times]),
-                value=weights_params['mu'][:, block, times],
+                weights_params['mu'][:, blocks, times],
+                torch.exp(weights_params['log_sigma'][:, blocks, times]),
+                value=weights_params['mu'][:, blocks, times],
                 name='Weights_%d-%d' % (times[0], times[-1])
             )
 
@@ -398,13 +398,13 @@ class DeepTFA:
                 hyperparams[k] = v.squeeze(0)
 
         weights, factor_centers, factor_log_widths =\
-            self.decoder(probtorch.Trace(), block, subjects, tasks, hyperparams,
-                         times, guide=guide, num_particles=1,
+            self.decoder(probtorch.Trace(), blocks, subjects, tasks,
+                         hyperparams, times, guide=guide, num_particles=1,
                          generative=generative)
 
         weights = weights.squeeze(0)
-        factor_centers = factor_centers.squeeze(0)
-        factor_log_widths = factor_log_widths.squeeze(0)
+        factor_centers = factor_centers[:, 0].squeeze(0)
+        factor_log_widths = factor_log_widths[:, 0].squeeze(0)
 
         if hist_weights:
             plt.hist(weights.view(weights.numel()).data.numpy())
@@ -422,9 +422,9 @@ class DeepTFA:
             for k, v in hyperparams.items():
                 hyperparams[k] = v.unsqueeze(0)
         if subject is not None:
-            result['z^P'] = hyperparams['subject']['mu'][:, subject]
+            result['z^P'] = hyperparams['subject']['mu'][0, subject]
         if task is not None:
-            result['z^S'] = hyperparams['task']['mu'][:, task]
+            result['z^S'] = hyperparams['task']['mu'][0, task]
         return result
 
     def reconstruction(self, block=None, subject=None, task=None, t=0):
