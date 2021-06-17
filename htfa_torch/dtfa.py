@@ -261,7 +261,7 @@ class DeepTFA:
 
         return np.vstack([free_energies])
 
-    def free_energy(self, batch_size=64, use_cuda=True, blocks_batch_size=4,
+    def free_energy(self, batch_size=64, use_cuda=True,
                     blocks_filter=lambda block: True, num_particles=1,
                     sample_size=10, predictive=False):
         testing_data = torch.utils.data.DataLoader(
