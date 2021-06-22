@@ -79,24 +79,35 @@ def average_reconstruction_error(blocks, activations, reconstruct):
 def average_weighted_reconstruction_error(blocks, num_times, num_voxels,
                                           activations, reconstruct):
     num_blocks = len(blocks)
-    image_norm = torch.zeros(num_blocks, max(num_times), num_voxels)
-    reconstruction_error = torch.zeros(num_blocks, max(num_times), num_voxels)
-    normed_error = torch.zeros(num_blocks, max(num_times), num_voxels)
+    image_norm = np.zeros(num_blocks)
+    reconstruction_error = np.zeros(num_blocks)
+    normed_error = np.zeros(num_blocks)
     if isinstance(num_voxels, list):
         num_voxels = num_voxels[0]
     for b, block in enumerate(blocks):
-        results = reconstruct(block, times=num_times[b])
+        results = reconstruct(block)
         reconstruction = results['weights'] @ results['factors']
         image = activations[block]['activations']
 
-        squared_diff = (image - reconstruction) ** 2
-        reconstruction_error[b] = squared_diff.sqrt()
-        image_norm[b] = image
-        normed_error[b] = reconstruction_error[b] / image_norm[b]
+        for t in range(results['weights'].shape[0]):
+            diff = np.linalg.norm(reconstruction[t] - image[t]) ** 2
+            normalizer = np.linalg.norm(image[t]) ** 2
 
-    image_norm = image_norm.mean(dim=0).mean(dim=0).mean(dim=0)
-    reconstruction_error = reconstruction_error.mean(dim=0).mean(dim=0).mean(dim=0)
-    normed_error = normed_error.mean(dim=0).mean(dim=0).mean(dim=0)
+            reconstruction_error[b] += diff
+            image_norm[b] += normalizer
+            normed_error[b] += (diff / normalizer)
+
+        reconstruction_error[b] /= num_times[block]
+        image_norm[b] /= num_times[block]
+        normed_error[b] /= num_times[block]
+
+    image_norm = sum(image_norm) / (num_blocks * num_voxels)
+    image_norm = np.sqrt(image_norm)
+    reconstruction_error = sum(reconstruction_error)
+    reconstruction_error /= num_blocks * num_voxels
+    reconstruction_error = np.sqrt(reconstruction_error)
+    normed_error = sum(normed_error) / (num_blocks * num_voxels)
+    normed_error = np.sqrt(normed_error)
 
     logging.info('Average reconstruction error (MSE): %.8e',
                  reconstruction_error)
