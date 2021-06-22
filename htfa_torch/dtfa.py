@@ -336,8 +336,8 @@ class DeepTFA:
                  prior_kl.mean(dim=0).item()],
                 [iwae_free_energy, iwae_log_likelihood, iwae_prior_kl]]
 
-    def results(self, block=None, subject=None, task=None, hist_weights=False,
-                generative=False):
+    def results(self, block=None, subject=None, task=None, times=None,
+                hist_weights=False, generative=False):
         hyperparams = self.variational.hyperparams.state_vardict()
         for k, v in hyperparams.items():
             hyperparams[k] = v.unsqueeze(0)
@@ -345,7 +345,9 @@ class DeepTFA:
         guide = probtorch.Trace()
         if block is None:
             block = 0
-        times = torch.arange(max(self.num_times))
+        if times is None:
+            times = max(self.num_times)
+        times = torch.arange(times)
         subject = self._subjects.index(self._dataset.blocks[block]['subject'])
         task = self._tasks.index(self._dataset.blocks[block]['task'])
 
