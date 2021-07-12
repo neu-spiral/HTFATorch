@@ -87,13 +87,15 @@ class FMriActivationBlock(object):
         if self.activations is None:
             self.load()
         basename, _ = os.path.splitext(os.path.basename(self.filename))
-
+        basename = basename.split('.')[0]
         for t in range(len(self)):
             yield {
                 '__key__': basename + ('_%06d' % (self.start_time + t)),
                 'pth': self.activations[t].to_sparse(),
                 'time.index': t,
                 'block.id': self.block,
+                'task': self.task,
+                'subject': str(self.subject),
             }
 
 class FMriActivationsDb:

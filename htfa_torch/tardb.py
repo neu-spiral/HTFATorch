@@ -9,9 +9,11 @@ __email__ = ('j.vandemeent@northeastern.edu',
 import torch
 import torch.utils.data
 import webdataset as wds
+from ordered_set import OrderedSet
+from . import utils
 
 def _collation_fn(samples):
-    result = {'__key__': [], 'activations': [], 't': [], 'block': []}
+    result = {'__key__': [], 'activations': [], 't': [], 'block': [], 'subject': [], 'task': []}
     for sample in samples:
         for k, v in sample.items():
             result[k].append(v)
@@ -31,7 +33,7 @@ class FmriTarDataset:
         self._dataset = wds.WebDataset(path, length=self._num_times)
         self._dataset = self._dataset.decode().rename(
             activations='pth', t='time.index', block='block.id',
-            __key__='__key__'
+            __key__='__key__', task='task', subject='subject',
         )
         self._dataset = self._dataset.map_dict(
             activations=lambda acts: acts.to_dense()
@@ -87,6 +89,26 @@ class FmriTarDataset:
         block = self.blocks[b]
         data = self._dataset.slice(block['times'][0], block['times'][-1] + 1)
         return _collation_fn(data)
+
+    def inference_filter(self, training=True, held_out_subjects=set(),
+                         held_out_tasks=set()):
+        # subjects = OrderedSet([b.subject for b in self.subjects()])
+        subjects = self.subjects()
+        subjects = [str(s) for s in subjects if s not in held_out_subjects]
+        subjects = OrderedSet(subjects)
+        tasks = self.tasks()
+        tasks = [t for t in tasks if t not in held_out_tasks]
+        tasks = OrderedSet(tasks)
+        # subjects = subjects - held_out_subjects
+        # tasks = OrderedSet([b.task for b in self.tasks()]) - held_out_tasks
+        diagonals = list(utils.striping_diagonal_indices(len(subjects),
+                                                         len(tasks)))
+        def result(b):
+            subject_index = subjects.index(b['subject'].decode("utf-8"))
+            task_index = tasks.index(b['task'].decode("utf-8"))
+            return ((subject_index, task_index) in diagonals) == (not training)
+
+        return result
 
     def mean_block(self):
         num_times = max(row['t'] for row in self._dataset) + 1
